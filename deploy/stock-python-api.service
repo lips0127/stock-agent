@@ -1,0 +1,24 @@
+[Unit]
+Description=Stock Agent Python API
+After=network.target
+
+[Service]
+Type=notify
+User=appuser
+Group=appuser
+WorkingDirectory=/opt/stock-agent
+EnvironmentFile=/opt/stock-agent/.env
+ExecStart=/opt/stock-agent/venv/bin/gunicorn \
+    --config backend/gunicorn_config.py \
+    "backend.api.app:create_app()"
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/stock-agent/data /opt/stock-agent/logs
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  python-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: stock-python-api
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-5000}:5000"
+    environment:
+      - DB_PATH=/data/stocks.db
+      - CACHE_DIR=/data/cache
+      - LOG_DIR=/data/logs
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production-256bit}
+      - DEFAULT_ADMIN_USER=${DEFAULT_ADMIN_USER:-}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:10086}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - app-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  app-data:
+    driver: local

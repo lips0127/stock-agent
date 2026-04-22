@@ -1,0 +1,15 @@
+.env
+*.db
+__pycache__/
+*.pyc
+logs/
+venv/
+venv_new/
+dist/
+build/
+*.egg-info/
+market_dividends_cache.json
+.claude/settings.local.json
+stock-backend/target/
+*.class
+*.jar

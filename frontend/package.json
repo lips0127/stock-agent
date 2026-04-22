@@ -1,0 +1,20 @@
+{
+  "name": "stock-agent-frontend",
+  "private": true,
+  "scripts": {
+    "build:weapp": "pnpm -F client build:weapp",
+    "build:h5": "pnpm -F client build:h5",
+    "dev:weapp": "pnpm -F client dev:weapp",
+    "dev:h5": "pnpm -F client dev:h5",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
+  },
+  "devDependencies": {
+    "eslint": "^8.0.0",
+    "prettier": "^2.0.0",
+    "typescript": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "pnpm": ">=7.0.0"
+  }
+}
