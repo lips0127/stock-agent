@@ -43,15 +43,9 @@ def _write_cache(data: list) -> None:
         logger.warning(f"Cache write failed: {e}")
 
 
-def get_high_dividend_stocks_by_concept(limit: int = 20) -> list:
-    """获取高股息股票列表，带缓存。"""
-    cached = _read_cache()
-    if cached is not None:
-        return cached.get("data", [])[:limit]
-
+def get_dividend_index_constituents() -> list:
+    """获取中证红利指数成分股代码列表。"""
     import akshare as ak
-
-    stocks = []
     try:
         df = ak.index_stock_cons(symbol="000922")
     except Exception:
@@ -60,13 +54,23 @@ def get_high_dividend_stocks_by_concept(limit: int = 20) -> list:
         except Exception as e:
             logger.error(f"Failed to fetch index constituents: {e}")
             return []
+    return df["品种代码"].astype(str).str.zfill(6).tolist()
 
-    for i, row in df.iterrows():
-        code = str(row["品种代码"]).zfill(6)
+
+def get_high_dividend_stocks_by_concept(limit: int = 20) -> list:
+    """获取高股息股票列表，带缓存。"""
+    cached = _read_cache()
+    if cached is not None:
+        return cached.get("data", [])[:limit]
+
+    codes = get_dividend_index_constituents()
+    stocks = []
+
+    for i, code in enumerate(codes):
         try:
             metrics = get_stock_metrics(code)
             if metrics and metrics.get("股息率"):
-                stocks.append(metrics)
+                stocks.append({"code": code, **metrics})
         except Exception as e:
             logger.warning(f"Failed to get metrics for {code}: {e}")
             continue

@@ -1,10 +1,11 @@
 
 import concurrent.futures
 import time
-import sqlite3
 import akshare as ak
 from backend.services.stock_service import get_stock_metrics, _no_proxy, get_sina_index_spot
-from backend.config import DB_PATH as DB_FILE, SCAN_MAX_WORKERS
+from backend.services.scanner_service import get_dividend_index_constituents
+from backend.core.database import get_connection
+from backend.config import SCAN_MAX_WORKERS
 import pandas as pd
 from datetime import date
 import random
@@ -12,43 +13,24 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Optimize SQLite for concurrency
-def configure_db_pragma(conn):
-    conn.execute("PRAGMA journal_mode=WAL;")  # Write-Ahead Logging for concurrency
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.commit()
+INDEX_SYMBOLS = {
+    "s_sh000001": "上证指数",
+    "s_sz399001": "深证成指",
+    "s_sz399006": "创业板指",
+    "s_sh000688": "科创50",
+    "s_sh000012": "国债指数",
+}
 
-def get_all_stock_codes():
-    """
-    Get all A-share stock codes.
-    Using ak.stock_info_a_code_name() is efficient.
-    """
-    logger.info("Fetching all A-share codes...")
-    try:
-        with _no_proxy():
-            df = ak.stock_info_a_code_name()
-        return df['code'].tolist()
-    except Exception as e:
-        logger.error(f"Error fetching codes: {e}")
-        return []
 
 def process_single_stock(code):
-    """
-    Process a single stock code.
-    Designed for concurrent execution.
-    """
+    """Process a single stock code, translating to English keys for DB."""
     try:
-        # Skip if code is empty or invalid
-        if not code: return None
-        
-        # Use our robust get_stock_metrics logic
-        # Add slight random delay to avoid hitting rate limits too hard if workers are synced
+        if not code:
+            return None
         time.sleep(random.uniform(0.05, 0.2))
-        
         metrics = get_stock_metrics(code)
-        
-        if metrics and metrics.get('最新价', 0) > 0: # Ensure valid price
-             return {
+        if metrics and metrics.get('最新价', 0) > 0:
+            return {
                 "code": code,
                 "name": metrics['名称'],
                 "price": metrics['最新价'],
@@ -59,98 +41,84 @@ def process_single_stock(code):
         return None
 
 
-def full_market_scan(max_workers=20):
-    """
-    Concurrent scan of the entire market using ThreadPoolExecutor.
-    """
-    all_codes = get_all_stock_codes()
-    if not all_codes:
-        logger.info(f"No codes found.")
-        return
+def get_all_indices():
+    """Fetch all major A-share index spot data."""
+    results = []
+    for symbol, expected_name in INDEX_SYMBOLS.items():
+        try:
+            data = get_sina_index_spot(symbol)
+            if data:
+                results.append({
+                    "symbol": symbol.replace("s_", ""),
+                    "name": data["name"],
+                    "value": data["current"],
+                    "change_amount": data["change_amount"],
+                    "change_pct": data["change_pct"],
+                })
+        except Exception as e:
+            logger.warning(f"Failed to fetch index {symbol}: {e}")
+    return results
 
-    logger.info(f"Total stocks to scan: {len(all_codes)}")
-    
+
+def full_market_scan(max_workers=None):
+    """全市场扫描任务。"""
+    logger.info("Starting full market scan...")
+
+    codes = get_dividend_index_constituents()
+
+    workers = max_workers or SCAN_MAX_WORKERS
+    stock_data = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(process_single_stock, code): code for code in codes}
+        for future in concurrent.futures.as_completed(futures):
+            code = futures[future]
+            try:
+                result = future.result()
+                if result:
+                    stock_data.append(result)
+            except Exception as e:
+                logger.error(f"Failed to get metrics for {code}: {e}")
+
+    indices_data = get_all_indices()
+
     today = date.today().isoformat()
-    total_results = []
-    
-    # Use ThreadPoolExecutor for concurrent fetching
-    # We submit individual tasks instead of batches for better load balancing
-    # But for 5000 stocks, creating 5000 futures is fine.
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_code = {executor.submit(process_single_stock, code): code for code in all_codes}
-        
-        completed_count = 0
-        total_count = len(all_codes)
-        
-        for future in concurrent.futures.as_completed(future_to_code):
-            code = future_to_code[future]
-            completed_count += 1
-            
-            if completed_count % 100 == 0:
-                logger.info(f"Progress: {completed_count}/{total_count} ({(completed_count/total_count)*100:.1f}%)")
-                
-            try:
-                data = future.result()
-                if data:
-                    total_results.append(data)
-            except Exception as e:
-                pass
-
-
-    logger.info(f"Scan complete. Saving {len(total_results)} records to DB...")
-    
-    # Batch Insert to DB
-    conn = sqlite3.connect(DB_FILE)
-    configure_db_pragma(conn)
-    
     try:
-        c = conn.cursor()
-        c.execute("BEGIN TRANSACTION;")
-        
-        # Clear today's existing data to avoid duplicates/stale mix?
-        # Or just replace.
-        
-        c.executemany('''
-            INSERT OR REPLACE INTO stock_daily_metrics (date, code, name, price, dividend_yield)
-            VALUES (?, ?, ?, ?, ?)
-        ''', [(today, r['code'], r['name'], r['price'], r['dividend_yield']) for r in total_results])
-        
-        conn.commit()
-        logger.info("Database update successful.")
+        with get_connection() as conn:
+            cur = conn.cursor()
+            if stock_data:
+                cur.executemany(
+                    """INSERT INTO stock_daily_metrics
+                       (date, code, name, price, dividend_yield)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(date, code) DO UPDATE SET
+                           name=excluded.name,
+                           price=excluded.price,
+                           dividend_yield=excluded.dividend_yield""",
+                    [(today, s['code'], s['name'], s['price'], s['dividend_yield'])
+                     for s in stock_data],
+                )
 
-        # Write market indices
-        INDEX_SYMBOLS = {
-            "000001": "上证指数",
-            "399001": "深证成指",
-            "399006": "创业板指",
-            "000016": "上证50",
-            "000300": "沪深300",
-        }
-        for symbol, name in INDEX_SYMBOLS.items():
-            try:
-                data = get_sina_index_spot(symbol)
-                if data:
-                    c.execute(
-                        "INSERT OR REPLACE INTO market_indices (date, symbol, name, value, change_amount, change_pct) VALUES (?, ?, ?, ?, ?, ?)",
-                        (today, symbol, name, data.get("current", 0), data.get("change_amount", 0), data.get("change_pct", 0)),
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to fetch index {symbol}: {e}")
-        conn.commit()
+            if indices_data:
+                cur.executemany(
+                    """INSERT INTO market_indices
+                       (date, symbol, name, value, change_amount, change_pct)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(date, symbol) DO UPDATE SET
+                           name=excluded.name,
+                           value=excluded.value,
+                           change_amount=excluded.change_amount,
+                           change_pct=excluded.change_pct""",
+                    [(today, i['symbol'], i['name'],
+                      i['value'], i['change_amount'], i['change_pct'])
+                     for i in indices_data],
+                )
 
+        logger.info(f"Market scan complete: {len(stock_data)} stocks, {len(indices_data)} indices")
     except Exception as e:
-        conn.rollback()
-        logger.error(f"Database error: {e}")
-    finally:
-        conn.close()
+        logger.error(f"Failed to save scan results: {e}")
+        raise
 
 if __name__ == "__main__":
     start_time = time.time()
-    # Adjust max_workers based on network capability. 
-    # Too high might trigger rate limits from Sina/EastMoney.
-    # 20-50 is usually safe for light HTTP requests.
-    full_market_scan(max_workers=30) 
+    full_market_scan(max_workers=30)
     logger.info(f"Total time: {time.time() - start_time:.2f} seconds")
-

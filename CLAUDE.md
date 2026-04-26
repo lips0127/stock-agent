@@ -2,80 +2,71 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+## 项目概述
 
-This is an A-share dividend monitoring system (A股股息监测系统) using a hybrid Java + Python architecture:
-- **Python Backend** (`backend/`): Data acquisition engine using AkShare for real-time stock metrics and dividend calculations
-- **Java Backend** (`stock-backend/`): Spring Boot gateway for authentication and business logic (in development)
-- **Frontend** (`frontend/`): Taro (React) cross-platform app targeting WeChat Mini Program and H5
-- **Database**: SQLite (`stocks.db`) — migration to MySQL planned
+A 股股息监测系统 — 个人量化工具，监控股息率 > 5% 且股价低于 MA120 的股票。
 
-## Common Commands
+## 架构（极简版）
 
-### Python Backend (Data Service)
+```
+浏览器 → Nginx (80) → Python Flask API (5000) → AkShare/Sina/EastMoney
+                          ↓
+                     SQLite DB (/data/stocks.db)
+```
+
+## 模块说明
+
+### Python 后端 (`backend/`)
+- `api/app.py` — Flask 应用入口
+- `api/routes/` — API 路由（auth, market, ops）
+- `services/stock_service.py` — 股票数据获取（新浪/EastMoney）
+- `services/scanner_service.py` — 股息指数成分股扫描
+- `services/scheduler.py` — APScheduler 定时任务（工作日 15:30）
+- `tasks/market_scan.py` — 全市场扫描脚本
+- `core/database.py` — SQLite 数据库操作
+- `core/logging_config.py` — 日志配置
+- `dashboard/app.py` — Streamlit 可视化看板（可选）
+
+### 前端 (`frontend/`)
+- 单页 HTML 应用，调用 `/api/` 获取数据
+- 直接由 Nginx 提供服务
+
+## 启动方式
+
 ```bash
-# Start Flask API (port 5000)
+# 开发模式（直接运行）
 python -m backend.api.app
 
-# Start Streamlit dashboard
-streamlit run backend/dashboard/app.py
+# Docker 部署
+docker-compose up --build
 
-# Run market scan task directly
+# 手动全量扫描
 python -m backend.tasks.market_scan
 ```
 
-### Frontend (Taro)
-```bash
-cd frontend
-npm run dev:weapp    # Watch mode for WeChat Mini Program
-npm run build:weapp  # Build for WeChat Mini Program
-npm run dev:h5       # Watch mode for H5
-npm run build:h5     # Build for H5
-```
+## 数据库
 
-### Java Backend
-```bash
-cd stock-backend
-mvn spring-boot:run
-```
+SQLite 文件：`stocks.db`（或 docker-compose 里的 `/data/stocks.db`）
 
-### Database
-The SQLite database (`stocks.db`) auto-initializes on first run. Default admin user: `admin` / `admin123`
+表结构：
+- `py_users` — 用户账户
+- `stock_daily_metrics` — 每日股票指标（代码、名称、价格、股息率）
+- `market_indices` — 大盘指数
 
-## Architecture
+## 核心 API
 
-### Data Flow
-```
-Client (Taro) → Java Gateway (8080) → Python Flask API (5000) → AkShare/Sina/EastMoney
-                                       ↓
-                                  SQLite DB
-```
+| Method | Path | 说明 |
+|--------|------|------|
+| GET | `/api/indices` | 大盘指数（上证/深证/创业板等） |
+| GET | `/api/top_stocks?limit=N` | 高股息股票排名 |
+| GET | `/api/stock/<symbol>` | 单只股票详情 |
+| POST | `/api/refresh` | 触发全市场扫描 |
+| GET | `/api/logs` | 任务执行日志 |
+| POST | `/api/auth/login` | 登录 |
+| GET | `/api/health` | 健康检查 |
 
-### Python Backend Structure
-- `backend/api/app.py` — Flask API routes (login, indices, top_stocks, stock/{symbol}, refresh, logs)
-- `backend/services/stock_service.py` — Stock metrics via Sina HQ + EastMoney dividend data
-- `backend/services/scanner_service.py` — CSI Dividend Index (000922) constituent scanning with caching
-- `backend/services/scheduler.py` — APScheduler daily task at 15:30 Mon-Fri
-- `backend/core/database.py` — SQLite schema init, user auth with pbkdf2_sha256
+## 开发注意事项
 
-### Key API Endpoints (Flask :5000)
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/login` | User authentication |
-| GET | `/api/indices` | Market indices snapshot |
-| GET | `/api/top_stocks` | High dividend stocks ranking |
-| GET | `/api/stock/<symbol>` | Individual stock metrics |
-| POST | `/api/refresh` | Trigger full market scan |
-| GET | `/api/logs` | Task execution logs |
-
-### Dividend Calculation Logic
-`stock_service.py:get_stock_metrics()` uses a two-tier approach:
-1. **TTM approach**: Sum cash dividends with ex-rights dates in the past 12 months
-2. **Fallback**: If no recent dividends, use the latest dividend (within 18 months)
-
-## Development Notes
-
-- AkShare calls are wrapped with `_no_proxy()` context manager to bypass corporate proxies
-- `market_dividends_cache.json` caches high-dividend scan results to avoid re-fetching
-- The `run.bat` script activates `venv_new` and runs a Streamlit app — this appears to be an alternative entry point
-- Frontend API service (`frontend/packages/client/src/services/api.ts`) makes requests to Java gateway at port 8080
+- AkShare 调用通过 `_no_proxy()` 上下文管理器绕过代理
+- `market_dividends_cache.json` 缓存高股息扫描结果
+- Docker 部署时数据库文件挂载在 `app-data` volume

@@ -12,6 +12,8 @@ import requests
 import akshare as ak
 import logging
 
+from backend.config import SINA_HQ_URL, SINA_REFERER, SINA_TIMEOUT, SINA_INDEX_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 # 代理相关环境变量
@@ -40,11 +42,11 @@ def _get_sina_hq(symbol: str) -> dict:
     else:
         full_symbol = f"sh{symbol}" # 默认 sh
 
-    url = f"http://hq.sinajs.cn/list={full_symbol}"
-    headers = {"Referer": "http://finance.sina.com.cn"}
-    
+    url = f"{SINA_HQ_URL}{full_symbol}"
+    headers = {"Referer": SINA_REFERER}
+
     with _no_proxy():
-        r = requests.get(url, headers=headers, timeout=10)
+        r = requests.get(url, headers=headers, timeout=SINA_TIMEOUT)
     
     if r.status_code != 200 or len(r.text) < 50:
         raise ValueError(f"无法从新浪获取股票 {symbol} 的行情")
@@ -70,12 +72,12 @@ def get_sina_index_spot(symbol: str) -> dict:
     s_sh000688 = 科创50
     s_sh000012 = 国债指数
     """
-    url = f"http://hq.sinajs.cn/list={symbol}"
-    headers = {"Referer": "http://finance.sina.com.cn"}
-    
+    url = f"{SINA_HQ_URL}{symbol}"
+    headers = {"Referer": SINA_REFERER}
+
     try:
         with _no_proxy():
-            r = requests.get(url, headers=headers, timeout=5)
+            r = requests.get(url, headers=headers, timeout=SINA_INDEX_TIMEOUT)
         
         # var hq_str_s_sh000001="上证指数,3041.17,54.12,1.81,3662283,39634568";
         if r.status_code == 200:

@@ -1,31 +1,64 @@
 version: "3.8"
 
 services:
+  # ── Python 数据服务 ──
   python-api:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
     container_name: stock-python-api
     restart: unless-stopped
-    ports:
-      - "${APP_PORT:-5000}:5000"
+    expose:
+      - "5000"
     environment:
-      - DB_PATH=/data/stocks.db
       - CACHE_DIR=/data/cache
       - LOG_DIR=/data/logs
-      - JWT_SECRET=${JWT_SECRET:-change-me-in-production-256bit}
-      - DEFAULT_ADMIN_USER=${DEFAULT_ADMIN_USER:-}
-      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-}
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:10086}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-2}
+      - SCAN_MAX_WORKERS=${SCAN_MAX_WORKERS:-20}
+      - DEFAULT_ADMIN_USER=${DEFAULT_ADMIN_USER:-admin}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-admin123}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
     volumes:
       - app-data:/data
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\""]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Nginx（前端 + API 反向代理）──
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: stock-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      python-api:
+        condition: service_healthy
+    networks:
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+networks:
+  backend:
+    driver: bridge
 
 volumes:
   app-data:

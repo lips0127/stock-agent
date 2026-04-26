@@ -2,13 +2,11 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# 加载 .env 文件（从项目根目录）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_PROJECT_ROOT / ".env")
 
 
 def _env(key: str, default: str = "", cast: type = str) -> object:
-    """从环境变量读取配置值，支持类型转换。"""
     val = os.environ.get(key, default)
     if cast is bool:
         return val.lower() in ("1", "true", "yes")
@@ -19,9 +17,6 @@ def _env(key: str, default: str = "", cast: type = str) -> object:
 HOST = _env("APP_HOST", "0.0.0.0")
 PORT = _env("APP_PORT", "5000", int)
 DEBUG = _env("APP_DEBUG", "false", bool)
-
-# ── 数据库 ──
-DB_PATH = _env("DB_PATH", str(_PROJECT_ROOT / "stocks.db"))
 
 # ── JWT ──
 JWT_SECRET = _env("JWT_SECRET", "change-me-in-production-256bit")
@@ -40,7 +35,7 @@ CACHE_DIR = _env("CACHE_DIR", str(_PROJECT_ROOT))
 CACHE_EXPIRE_HOURS = _env("CACHE_EXPIRE_HOURS", "6", int)
 
 # ── CORS ──
-CORS_ORIGINS = _env("CORS_ORIGINS", "http://localhost:10086,http://localhost:8501")
+CORS_ORIGINS = _env("CORS_ORIGINS", "http://localhost:3000,http://localhost:8000")
 
 # ── Sina API ──
 SINA_HQ_URL = _env("SINA_HQ_URL", "http://hq.sinajs.cn/list=")
@@ -58,6 +53,6 @@ RATE_LIMIT_PER_MINUTE = _env("RATE_LIMIT_PER_MINUTE", "30", int)
 LOG_LEVEL = _env("LOG_LEVEL", "INFO")
 LOG_DIR = _env("LOG_DIR", str(_PROJECT_ROOT / "logs"))
 
-# ── 默认管理员（仅首次初始化） ──
+# ── 默认管理员 ──
 DEFAULT_ADMIN_USER = _env("DEFAULT_ADMIN_USER", "admin")
-DEFAULT_ADMIN_PASSWORD = _env("DEFAULT_ADMIN_PASSWORD", "")
+DEFAULT_ADMIN_PASSWORD = _env("DEFAULT_ADMIN_PASSWORD", "admin123")

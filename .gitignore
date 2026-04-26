@@ -1,5 +1,6 @@
 .env
 *.db
+tencent_key
 __pycache__/
 *.pyc
 logs/
@@ -13,3 +14,4 @@ market_dividends_cache.json
 stock-backend/target/
 *.class
 *.jar
+node_modules/
