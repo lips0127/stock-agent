@@ -151,31 +151,34 @@ def get_stock_metrics(symbol: str) -> dict:
             df_impl = df_div[df_div['方案进度'] == '实施分配'].copy()
             
             if not df_impl.empty:
-                # 方案 1: 近 12 个月累计分红 (TTM)
+                # 按财年分组，每组只取最后一次分红（中期+年度属于同一财年，合并计算）
+                df_impl['_财年'] = pd.to_datetime(df_impl['报告期'], errors='coerce').dt.year
+                df_impl = df_impl.sort_values('股权登记日', ascending=False)
+                dividends_by_year = df_impl.groupby('_财年').first().reset_index()
+
                 now = pd.Timestamp.now()
                 one_year_ago = now - pd.DateOffset(years=1)
-                
-                # 必须确保股权登记日有效
-                recent_divs = df_impl[
-                    (df_impl['股权登记日'] >= one_year_ago) & 
-                    (df_impl['股权登记日'] <= now)
+
+                # 只取近12个月有分红的财年
+                recent_years = dividends_by_year[
+                    (dividends_by_year['股权登记日'] >= one_year_ago) &
+                    (dividends_by_year['股权登记日'] <= now)
                 ]
-                
-                if not recent_divs.empty:
+
+                if not recent_years.empty:
+                    # 取最近1-2个财年，避免跨年混合计算
+                    target_years = recent_years['_财年'].head(2).tolist()
+                    recent_divs = dividends_by_year[dividends_by_year['_财年'].isin(target_years)]
                     total_cash_per_10 = recent_divs['现金分红-现金分红比例'].sum()
                 else:
-                    # 方案 2: 若近 12 个月无记录，取最新的一笔 (仅当最新一笔在合理范围内，比如 18 个月内)
-                    df_impl = df_impl.sort_values('报告期', ascending=False)
-                    latest_div = df_impl.iloc[0]
+                    # 若近12个月无记录，取最近的一笔（18个月内有效）
+                    latest_div = dividends_by_year.iloc[0]
                     latest_date = latest_div['股权登记日']
-                    
-                    # 如果最新分红超过 1.5 年，视为无分红（避免历史高分红被误算）
                     if pd.notna(latest_date) and latest_date >= (now - pd.DateOffset(months=18)):
                         total_cash_per_10 = latest_div['现金分红-现金分红比例']
                     else:
                         total_cash_per_10 = 0.0
 
-                
                 if total_cash_per_10 > 0 and latest_price > 0:
                     div_per_share = total_cash_per_10 / 10.0
                     dividend_yield_pct = (div_per_share / latest_price) * 100

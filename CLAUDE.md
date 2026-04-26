@@ -25,7 +25,6 @@ A 股股息监测系统 — 个人量化工具，监控股息率 > 5% 且股价�
 - `tasks/market_scan.py` — 全市场扫描脚本
 - `core/database.py` — SQLite 数据库操作
 - `core/logging_config.py` — 日志配置
-- `dashboard/app.py` — Streamlit 可视化看板（可选）
 
 ### 前端 (`frontend/`)
 - 单页 HTML 应用，调用 `/api/` 获取数据

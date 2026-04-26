@@ -37,6 +37,18 @@ def create_app() -> Flask:
     def index():
         return send_from_directory(frontend_dir, 'index.html')
 
+    @app.route('/assets/<path:filename>')
+    def serve_assets(filename):
+        return send_from_directory(os.path.join(frontend_dir, 'assets'), filename)
+
+    # 前端路由兜底：所有非 API 路径都返回 index.html，让 Vue Router 接管
+    @app.route('/<path:path>')
+    def serve_frontend(path):
+        # 避免拦截 API 路由
+        if path.startswith('api/'):
+            return jsonify({"error": "Not found"}), 404
+        return send_from_directory(frontend_dir, 'index.html')
+
     # 全局错误处理
     @app.errorhandler(404)
     def not_found(e):
