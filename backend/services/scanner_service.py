@@ -3,7 +3,7 @@ import time
 import logging
 from pathlib import Path
 from backend.config import CACHE_DIR, CACHE_EXPIRE_HOURS
-from backend.services.stock_service import get_stock_metrics
+from backend.services.stock_service import get_stock_metrics, _no_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -47,18 +47,21 @@ def get_dividend_index_constituents() -> list:
     """获取中证红利指数成分股代码列表。"""
     import akshare as ak
     try:
-        df = ak.index_stock_cons(symbol="000922")
-    except Exception:
+        with _no_proxy():
+            df = ak.index_stock_cons(symbol="000922")
+    except Exception as e:
+        logger.warning(f"获取中证红利指数(000922)成分股失败，尝试回退 000015: {e}", exc_info=True)
         try:
-            df = ak.index_stock_cons(symbol="000015")
+            with _no_proxy():
+                df = ak.index_stock_cons(symbol="000015")
         except Exception as e:
-            logger.error(f"Failed to fetch index constituents: {e}")
+            logger.error(f"获取红利指数成分股失败(000922 和 000015 均失败): {e}", exc_info=True)
             return []
     return df["品种代码"].astype(str).str.zfill(6).tolist()
 
 
-def get_high_dividend_stocks_by_concept(limit: int = 20) -> list:
-    """获取高股息股票列表，带缓存。"""
+def get_top_dividend_stocks(limit: int = 20) -> list:
+    """从红利指数成分股中获取股息率 TOP N 股票，带缓存。"""
     cached = _read_cache()
     if cached is not None:
         return cached.get("data", [])[:limit]
@@ -72,7 +75,7 @@ def get_high_dividend_stocks_by_concept(limit: int = 20) -> list:
             if metrics and metrics.get("股息率"):
                 stocks.append({"code": code, **metrics})
         except Exception as e:
-            logger.warning(f"Failed to get metrics for {code}: {e}")
+            logger.warning(f"Failed to get metrics for {code}: {e}", exc_info=True)
             continue
         if i > 0 and i % 5 == 0:
             time.sleep(1)

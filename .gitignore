@@ -15,3 +15,6 @@ stock-backend/target/
 *.class
 *.jar
 node_modules/
+stock_names.json
+.idea/
+MEMORY.md

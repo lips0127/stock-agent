@@ -1,0 +1,69 @@
+:root {
+  --color-primary: #e94560;
+  --color-up: #e94560;
+  --color-down: #2ecc71;
+  --bg-body: #f0f2f5;
+  --bg-card: #ffffff;
+  --color-header-bg: #1a1a2e;
+  --color-header-text: #ffffff;
+  --color-surface: #ffffff;
+  --color-border: #ebeef5;
+  --color-text-primary: #1a1a2e;
+  --color-text-secondary: #666;
+  --color-text-muted: #999;
+  --shadow-card: 0 2px 12px rgba(0, 0, 0, 0.06);
+  --shadow-card-hover: 0 6px 24px rgba(0, 0, 0, 0.1);
+  --radius-card: 12px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  background: var(--bg-body);
+  color: #333;
+}
+
+.text-up { color: var(--color-up); }
+.text-down { color: var(--color-down); }
+
+.section-card {
+  margin-bottom: 24px;
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  transition: box-shadow 0.25s ease;
+}
+.section-card:hover {
+  box-shadow: var(--shadow-card-hover);
+}
+.section-card :deep(.el-card__header) {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--color-border);
+}
+.section-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+/* fade transition for router-view */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* slide-up transition for progress bar */
+.slide-up-enter-active,
+.slide-up-leave-active {
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+.slide-up-enter-from,
+.slide-up-leave-to {
+  transform: translateY(100%);
+  opacity: 0;
+}

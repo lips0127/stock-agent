@@ -1,0 +1,16 @@
+.git
+.gitignore
+.idea
+.vscode
+
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+
+.env
+.env.example
+*.log
+
+stocks.db
+market_dividends_cache.json

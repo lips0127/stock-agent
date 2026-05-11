@@ -1,6 +1,7 @@
 import time
 import functools
 import jwt
+import logging
 from flask import request, jsonify, g
 from flask_cors import CORS
 from backend.config import (
@@ -29,11 +30,14 @@ def generate_token(username: str) -> str:
 
 def verify_token(token: str) -> dict | None:
     """验证 JWT token，返回 payload 或 None。"""
+    _logger = logging.getLogger(__name__)
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
+        _logger.warning("JWT token 已过期")
         return None
-    except jwt.InvalidTokenError:
+    except jwt.InvalidTokenError as e:
+        _logger.warning(f"JWT token 无效: {e}")
         return None
 
 
