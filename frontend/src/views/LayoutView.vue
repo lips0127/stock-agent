@@ -2,7 +2,7 @@
   <div class="app-layout">
     <header class="app-header">
       <div class="header-left">
-        <h1 class="logo" @click="$router.push('/dashboard')">A股股息监测</h1>
+        <h1 class="logo" @click="$router.push('/dashboard')">量化交易系统</h1>
         <el-menu
           mode="horizontal"
           :default-active="activeMenu"
@@ -16,6 +16,9 @@
           <el-menu-item index="/dashboard">仪表盘</el-menu-item>
           <el-menu-item index="/stocks">全量扫描</el-menu-item>
           <el-menu-item index="/sentiment">舆情监控</el-menu-item>
+          <el-menu-item index="/strategies">策略</el-menu-item>
+          <el-menu-item index="/backtest">回测</el-menu-item>
+          <el-menu-item index="/portfolio">组合</el-menu-item>
         </el-menu>
       </div>
       <div class="header-right">

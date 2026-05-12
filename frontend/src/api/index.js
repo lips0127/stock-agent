@@ -64,3 +64,16 @@ export const getSentimentScores = (code, days = 30) =>
 export const analyzeSentiment = (stock_code, forum_type = 'eastmoney') =>
   api.post('/sentiment/analyze', { stock_code, forum_type })
 export const batchAnalyzeSentiment = () => api.post('/sentiment/batch_analyze')
+
+// 量化交易系统
+export const getStrategies = () => api.get('/strategies')
+export const getStrategy = (name) => api.get(`/strategies/${name}`)
+
+export const runBacktest = (config) => api.post('/backtest/run', config)
+export const getBacktestRuns = (limit) => api.get('/backtest/runs', { params: { limit } })
+export const getBacktestRun = (id) => api.get(`/backtest/runs/${id}`)
+
+export const getPortfolio = () => api.get('/quant/portfolio')
+export const getPositions = () => api.get('/quant/positions')
+export const getSnapshots = () => api.get('/quant/snapshots')
+export const getRiskRules = () => api.get('/quant/risk/rules')

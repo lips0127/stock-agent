@@ -10,7 +10,7 @@ dist/
 build/
 *.egg-info/
 market_dividends_cache.json
-.claude/settings.local.json
+.claude/
 stock-backend/target/
 *.class
 *.jar

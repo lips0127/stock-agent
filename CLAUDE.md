@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-A 股股息监测系统 — 个人量化工具，监控股息率 > 5% 且股价低于 MA120 的股票。
+量化交易系统 — 个人量化工具，集股息率监控、策略回测、事件驱动交易框架于一体。
 
 ## 架构（极简版）
 
@@ -17,21 +17,43 @@ A 股股息监测系统 — 个人量化工具，监控股息率 > 5% 且股价�
 ## 模块说明
 
 ### Python 后端 (`backend/`)
+
+**API & 核心**
 - `api/app.py` — Flask 应用入口
-- `api/routes/` — API 路由（auth, market, ops）
+- `api/routes/` — API 路由（auth, market, ops, sentiment, strategies, backtest, quant）
+- `core/database.py` — SQLite 数据库操作（15 张表）
+- `core/logging_config.py` — 日志配置
+
+**数据 & 服务**
 - `services/stock_service.py` — 股票数据获取（新浪/EastMoney）
 - `services/scanner_service.py` — 股息指数成分股扫描
 - `services/scheduler.py` — APScheduler 定时任务（工作日 15:30）
-- `tasks/market_scan.py` — 扫描脚本：`scan_dividend_index`（红利指数）和 `scan_all_a_shares`（全市场）
-- `core/database.py` — SQLite 数据库操作
-- `core/logging_config.py` — 日志配置
+- `services/forum_service.py` — 东财股吧爬虫
+- `services/sentiment_service.py` — LLM 情绪分析（LangChain）
+- `tasks/market_scan.py` — 扫描脚本
+
+**量化交易骨架（Phase 1 完成）**
+- `engine/event_bus.py` — 事件总线（内存 pub/sub）
+- `engine/events.py` — 10 种事件类型
+- `engine/clock.py` — 3 种时钟（Real/Replay/Simulation）
+- `strategy/base.py` — 策略基类（on_bar/on_tick/buy/sell）
+- `strategy/context.py` — 策略上下文（下单/查持仓/查历史）
+- `strategy/registry.py` — 策略注册表（@register 装饰器）
+- `strategy/examples/ma_cross.py` — 均线交叉示例策略
+- `data/` — Bar 结构 + DataProvider 抽象 + 历史数据(akshare+DB)
+- `execution/` — Order 状态机 + AbstractBroker 接口 + PaperBroker
+- `portfolio/` — Position 模型 + PortfolioManager
+- `risk/` — RiskManager + 风控规则
+- `backtest/engine.py` — 回测引擎（事件驱动重放）
+- `backtest/metrics.py` — 绩效指标（夏普/回撤/胜率）
 
 ### 前端 (`frontend/`)
-- 单页 HTML 应用，调用 `/api/` 获取数据
-- 直接由 Nginx 提供服务
+- Vue 3 + Element Plus + Pinia + Vue Router 单页应用
+- 页面：仪表盘、全量扫描、舆情监控、策略管理、回测、组合管理
+- 调用 `/api/` 获取数据，生产环境由 Nginx 托管 dist/
 
 ## 启动方式
-za
+
 ```bash
 # 开发模式（直接运行）
 python -m backend.api.app
@@ -47,10 +69,22 @@ python -m backend.tasks.market_scan
 
 SQLite 文件：`stocks.db`（或 docker-compose 里的 `/data/stocks.db`）
 
-表结构：
+表结构（15 张表）：
 - `py_users` — 用户账户
-- `stock_daily_metrics` — 每日股票指标（代码、名称、价格、股息率、scan_type）
+- `stock_daily_metrics` — 每日股票指标
 - `market_indices` — 大盘指数
+- `scan_tasks` — 扫描任务跟踪
+- `sentiment_config` — 舆情监控配置
+- `forum_posts` — 股吧帖子缓存
+- `sentiment_scores` — LLM 情绪评分
+- `strategies` — 量化策略定义
+- `historical_bars` — 历史K线缓存
+- `signals` — 交易信号记录
+- `orders` — 订单记录
+- `positions` — 持仓记录
+- `portfolio_snapshots` — 组合快照
+- `backtest_runs` — 回测运行记录
+- `backtest_trades` — 回测交易明细
 
 ## 核心 API
 
@@ -65,6 +99,13 @@ SQLite 文件：`stocks.db`（或 docker-compose 里的 `/data/stocks.db`）
 | GET | `/api/logs` | 任务执行日志 |
 | POST | `/api/auth/login` | 登录 |
 | GET | `/api/health` | 健康检查 |
+| GET | `/api/strategies` | 列出已注册策略类型 |
+| POST | `/api/backtest/run` | 运行回测（异步） |
+| GET | `/api/backtest/runs` | 历史回测记录 |
+| GET | `/api/backtest/runs/<id>` | 回测详情 + 交易明细 |
+| GET | `/api/quant/portfolio` | 组合快照 |
+| GET | `/api/quant/positions` | 持仓列表 |
+| GET | `/api/quant/risk/rules` | 风控规则参考 |
 
 ## 开发注意事项
 

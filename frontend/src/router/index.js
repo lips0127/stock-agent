@@ -37,6 +37,22 @@ const routes = [
         name: 'Sentiment',
         component: () => import('../views/SentimentView.vue'),
       },
+      // 量化交易
+      {
+        path: 'strategies',
+        name: 'Strategies',
+        component: () => import('../views/StrategiesView.vue'),
+      },
+      {
+        path: 'backtest',
+        name: 'Backtest',
+        component: () => import('../views/BacktestView.vue'),
+      },
+      {
+        path: 'portfolio',
+        name: 'Portfolio',
+        component: () => import('../views/PortfolioView.vue'),
+      },
     ],
   },
 ]

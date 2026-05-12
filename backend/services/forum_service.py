@@ -313,6 +313,50 @@ def fetch_forum_posts(code: str, forum_type: str = "eastmoney",
     return result
 
 
+def test_post_attribution(code: str) -> dict:
+    """测试用例：验证 fetch_post_list 返回的帖子都来自目标股票。
+
+    先通过 fetch_post_list（含 stockbar_code filter）获取帖子，
+    再额外对原始 JSON 做全量扫描，对比过滤前后差异。
+
+    Returns:
+        {"filtered": N, "total_raw": N, "mismatch": N, "details": [...]}
+    """
+    code = str(code).strip().zfill(6)
+
+    # 1. 通过带 filter 的标准函数获取
+    filtered_posts = fetch_post_list(code, days=7, max_posts=80)
+    # 2. 对原始 JSON 做全量扫描
+    result = {"filtered": len(filtered_posts), "total_raw": 0, "mismatch": 0, "details": []}
+
+    try:
+        with _no_proxy():
+            r = requests.get(GUBA_LIST_URL.format(code=code), headers=HEADERS, timeout=15)
+        r.encoding = "utf-8"
+        data = _extract_json(r.text, "article_list")
+        if data:
+            for item in data.get("re", []):
+                item_code = str(item.get("stockbar_code", "")).zfill(6)
+                result["total_raw"] += 1
+                if item_code != code and item_code != "000000":
+                    result["mismatch"] += 1
+                    result["details"].append({
+                        "title": item.get("post_title", "")[:40],
+                        "stockbar_code": item_code,
+                        "stockbar_name": item.get("stockbar_name", ""),
+                    })
+
+        pass_rate = (1 - result["mismatch"] / result["total_raw"]) * 100 if result["total_raw"] else 0
+        logger.info(
+            f"归属测试 {code}: filtered={result['filtered']}/{result['total_raw']} "
+            f"cross_stock={result['mismatch']} rate={pass_rate:.1f}%"
+        )
+    except Exception as e:
+        logger.error(f"归属测试失败: {code}: {e}")
+
+    return result
+
+
 def get_recent_posts(code: str, forum_type: str = "eastmoney",
                      limit: int = 20) -> list[dict]:
     """从 DB 缓存中获取最近的帖子（不重新爬取）。"""

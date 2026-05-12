@@ -145,6 +145,119 @@ def init_db():
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sentiment_code ON sentiment_scores(stock_code, date)")
 
+        # ── 量化交易系统表 ──────────────────────────────
+
+        cur.execute("CREATE TABLE IF NOT EXISTS strategies ("
+                    "id TEXT PRIMARY KEY,"
+                    "name TEXT NOT NULL,"
+                    "strategy_class TEXT NOT NULL,"
+                    "params_json TEXT,"
+                    "symbols_json TEXT,"
+                    "timeframes_json TEXT,"
+                    "enabled INTEGER DEFAULT 0,"
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+
+        cur.execute("CREATE TABLE IF NOT EXISTS historical_bars ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "symbol TEXT NOT NULL,"
+                    "timeframe TEXT NOT NULL,"
+                    "bar_time TEXT NOT NULL,"
+                    "open REAL, high REAL, low REAL, close REAL,"
+                    "volume REAL, amount REAL,"
+                    "UNIQUE(symbol, timeframe, bar_time))"
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_hb_symbol_tf ON historical_bars(symbol, timeframe)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_hb_time ON historical_bars(bar_time)")
+
+        cur.execute("CREATE TABLE IF NOT EXISTS signals ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "strategy_id TEXT NOT NULL,"
+                    "symbol TEXT NOT NULL,"
+                    "direction TEXT NOT NULL,"
+                    "strength REAL DEFAULT 1.0,"
+                    "reason TEXT,"
+                    "bar_time TEXT,"
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+
+        cur.execute("CREATE TABLE IF NOT EXISTS orders ("
+                    "id TEXT PRIMARY KEY,"
+                    "strategy_id TEXT,"
+                    "symbol TEXT NOT NULL,"
+                    "side TEXT NOT NULL,"
+                    "quantity REAL NOT NULL,"
+                    "price REAL,"
+                    "order_type TEXT NOT NULL,"
+                    "status TEXT NOT NULL DEFAULT 'CREATED',"
+                    "filled_qty REAL DEFAULT 0,"
+                    "filled_price REAL,"
+                    "commission REAL DEFAULT 0,"
+                    "error_message TEXT,"
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+                    "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_strategy ON orders(strategy_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
+
+        cur.execute("CREATE TABLE IF NOT EXISTS positions ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "strategy_id TEXT,"
+                    "symbol TEXT NOT NULL,"
+                    "quantity REAL NOT NULL,"
+                    "avg_cost REAL NOT NULL,"
+                    "current_price REAL,"
+                    "unrealized_pnl REAL,"
+                    "realized_pnl REAL DEFAULT 0,"
+                    "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+
+        cur.execute("CREATE TABLE IF NOT EXISTS portfolio_snapshots ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "date TEXT NOT NULL,"
+                    "strategy_id TEXT,"
+                    "total_value REAL,"
+                    "cash REAL,"
+                    "positions_value REAL,"
+                    "daily_pnl REAL,"
+                    "cumulative_pnl REAL,"
+                    "daily_return REAL,"
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+
+        cur.execute("CREATE TABLE IF NOT EXISTS backtest_runs ("
+                    "id TEXT PRIMARY KEY,"
+                    "strategy_name TEXT NOT NULL,"
+                    "start_date TEXT NOT NULL,"
+                    "end_date TEXT NOT NULL,"
+                    "initial_capital REAL,"
+                    "final_value REAL,"
+                    "total_return REAL,"
+                    "annual_return REAL,"
+                    "sharpe_ratio REAL,"
+                    "max_drawdown REAL,"
+                    "win_rate REAL,"
+                    "total_trades INTEGER,"
+                    "params_json TEXT,"
+                    "status TEXT DEFAULT 'running',"
+                    "error_message TEXT,"
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+
+        cur.execute("CREATE TABLE IF NOT EXISTS backtest_trades ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                    "backtest_id TEXT NOT NULL,"
+                    "symbol TEXT,"
+                    "side TEXT,"
+                    "entry_time TEXT,"
+                    "exit_time TEXT,"
+                    "entry_price REAL,"
+                    "exit_price REAL,"
+                    "quantity REAL,"
+                    "pnl REAL,"
+                    "pnl_pct REAL)"
+        )
+
         # 迁移：为已有表添加 scan_type 列
         try:
             cur.execute("ALTER TABLE stock_daily_metrics ADD COLUMN scan_type TEXT")

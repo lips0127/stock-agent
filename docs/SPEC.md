@@ -1,10 +1,12 @@
-# A 股股息监测系统 — SPEC
+# 量化交易系统 — SPEC
 
 ## 1. 项目概述
 
-**项目名称**: A 股股息监测系统
+**项目名称**: 量化交易系统
 **项目类型**: 个人量化工具
-**核心功能**: 监控股息率 > 5% 且股价低于 MA120 的 A 股股票
+**核心功能**: 
+  - 股息率监控：监控股息率 > 5% 且股价低于 MA120 的 A 股股票
+  - 量化交易：事件驱动策略框架 + 回测引擎 + 策略管理
 **技术栈**: Python Flask (后端) + Vue 3 + Element Plus (前端) + SQLite
 
 ## 2. 系统架构
@@ -30,6 +32,10 @@
 | `routes/market.py` | `GET /api/indices`（DB 缓存）、`GET /api/indices/live`（实时）、`GET /api/top_stocks`、`GET /api/all_stocks` |
 | `routes/ops.py` | 扫描任务：`POST /api/index_scan`、`POST /api/full_refresh`、`GET /api/tasks` 系列 |
 | `routes/stock.py` | `GET /api/stock/<symbol>` — 单只股票详情 |
+| `routes/sentiment.py` | 舆情监控 CRUD + LLM 情绪分析 |
+| `routes/strategies.py` | `GET /api/strategies` — 列出已注册策略 |
+| `routes/backtest.py` | `POST /api/backtest/run`、`GET /api/backtest/runs`、`GET /api/backtest/runs/<id>` |
+| `routes/quant.py` | `GET /api/quant/portfolio`、`GET /api/quant/positions`、`GET /api/quant/risk/rules` |
 
 ### 3.2 核心层 (`backend/core/`)
 
@@ -46,13 +52,69 @@
 | `scanner_service.py` | 中证红利指数成分股获取、TOP N 高股息股票查询（带缓存） |
 | `scheduler.py` | APScheduler 定时任务（工作日 15:30 红利指数扫描）、手动触发接口 |
 
-### 3.4 任务层 (`backend/tasks/`)
+### 3.4 量化交易引擎 (`backend/engine/`)
+
+事件驱动架构，所有组件通过 EventBus 通信。
+
+| 文件 | 职责 |
+|------|------|
+| `event_bus.py` | 内存 pub/sub，基于 isinstance 类型匹配，优先级排序 |
+| `events.py` | 10 种事件类型（Bar/Tick/Signal/Order/Fill/Position/Portfolio/Start/Stop/Timer） |
+| `clock.py` | 3 种时钟：RealClock（实盘）、ReplayClock（回测）、SimulationClock（模拟） |
+
+### 3.5 策略框架 (`backend/strategy/`)
+
+| 文件 | 职责 |
+|------|------|
+| `base.py` | 策略基类，生命周期：on_init → on_start → on_bar/on_tick/on_fill → on_stop |
+| `context.py` | 策略上下文，提供 buy/sell/get_position/get_history 等便捷方法 |
+| `registry.py` | @register 装饰器注册策略，按名称查询 |
+| `examples/ma_cross.py` | 均线交叉示例策略（快线上穿慢线买入，下穿卖出） |
+
+### 3.6 回测系统 (`backend/backtest/`)
+
+| 文件 | 职责 |
+|------|------|
+| `engine.py` | 事件驱动回测引擎：加载历史数据 → 重放 Bar → 策略触发 → 模拟成交 |
+| `metrics.py` | 绩效指标：总收益、年化收益、夏普比率、最大回撤、胜率、盈亏比 |
+
+### 3.7 执行层 (`backend/execution/`)
+
+| 文件 | 职责 |
+|------|------|
+| `order.py` | Order 状态机（CREATED → SUBMITTED → FILLED/REJECTED/CANCELLED） |
+| `broker.py` | AbstractBroker 接口定义 |
+| `paper_broker.py` | 模拟券商：市价/限价成交、滑点、佣金、部分成交 |
+
+### 3.8 组合管理 (`backend/portfolio/`)
+
+| 文件 | 职责 |
+|------|------|
+| `position.py` | Position 模型（加权平均成本、未实现盈亏） |
+| `manager.py` | PortfolioManager：监听 FillEvent，维护持仓/现金/盈亏 |
+
+### 3.9 风控 (`backend/risk/`)
+
+| 文件 | 职责 |
+|------|------|
+| `manager.py` | RiskManager：在订单执行前（priority=15）校验，黑名单模式 |
+| `rules.py` | 可组合规则：MaxPositionRule / OrderSizeRule / DailyLossLimitRule |
+
+### 3.10 数据层 (`backend/data/`)
+
+| 文件 | 职责 |
+|------|------|
+| `bar.py` | Bar 数据结构（OHLCV） |
+| `provider.py` | DataProvider 抽象接口 |
+| `historical.py` | HistoricalDataProvider：从 AkShare 获取 A 股日线（前复权）+ SQLite 缓存 |
+
+### 3.11 任务层 (`backend/tasks/`)
 
 | 文件 | 职责 |
 |------|------|
 | `market_scan.py` | `scan_dividend_index`（红利指数成分股约 100 只）、`scan_all_a_shares`（全市场约 5800+ 只）、`get_all_a_share_codes`（AkShare） |
 
-### 3.5 配置层 (`backend/config.py`)
+### 3.12 配置层 (`backend/config.py`)
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
@@ -72,6 +134,10 @@
   /dashboard      → DashboardView.vue (嵌套子路由)
   /stocks         → StocksView.vue
   /scan/:taskId   → ScanProgressView.vue
+  /sentiment      → SentimentView.vue
+  /strategies     → StrategiesView.vue
+  /backtest       → BacktestView.vue
+  /portfolio      → PortfolioView.vue
 ```
 
 LayoutView 提供深色顶栏导航 + 底部持久扫描进度条。
@@ -92,6 +158,10 @@ LayoutView 提供深色顶栏导航 + 底部持久扫描进度条。
 | `DashboardView.vue` | 仪表盘：大盘指数卡片（实时） + TOP20 高股息表格 + 扫描任务日志 |
 | `StocksView.vue` | 全量扫描结果：服务端分页表格 + 搜索/筛选 + 股票详情弹窗 |
 | `ScanProgressView.vue` | 扫描进度详情：进度概览 + 已扫描股票实时列表 |
+| `SentimentView.vue` | 舆情监控仪表盘：配置管理 + LLM 情绪评分 |
+| `StrategiesView.vue` | 策略管理：展示已注册策略的参数/标的，一键跳转回测 |
+| `BacktestView.vue` | 策略回测：配置参数 → 异步运行 → 展示绩效指标 + 交易明细 |
+| `PortfolioView.vue` | 组合管理：组合快照 + 持仓列表 + 风控规则参考 |
 
 ### 4.4 组件 (`frontend/src/components/`)
 
@@ -124,6 +194,15 @@ LayoutView 提供深色顶栏导航 + 底部持久扫描进度条。
 | GET | `/api/tasks/<task_id>/progress` | 任务进度 + 已扫描股票列表 | 是 |
 | GET | `/api/logs` | 扫描任务执行日志 | 是 |
 | GET | `/api/health` | 健康检查 | 否 |
+| GET | `/api/strategies` | 列出已注册策略类型 | 是 |
+| GET | `/api/strategies/<name>` | 策略详情（参数/标的） | 是 |
+| POST | `/api/backtest/run` | 运行回测（异步） | 是 |
+| GET | `/api/backtest/runs` | 历史回测记录列表 | 是 |
+| GET | `/api/backtest/runs/<id>` | 回测详情 + 交易明细 | 是 |
+| GET | `/api/quant/portfolio` | 组合快照 | 是 |
+| GET | `/api/quant/positions` | 持仓列表 | 是 |
+| GET | `/api/quant/snapshots` | 组合净值历史 | 是 |
+| GET | `/api/quant/risk/rules` | 风控规则参考 | 是 |
 
 ## 6. 数据库 schema
 
