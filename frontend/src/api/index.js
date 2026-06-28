@@ -162,13 +162,12 @@ export const getMarketIntraday = (symbol, interval = '30min', days = 7) =>
   api.get('/market/intraday', { params: { symbol, interval, days } })
 
 // VIX 恐慌指数 + 恐惧贪婪综合指数
+// 重算/回填为异步任务，返回 task_id；状态用 getTask(taskId) 轮询（旧 *_status 端点已 410）
 export const getVix = () => api.get('/vix')
 export const getVixHistory = (days = 60) => api.get('/vix/history', { params: { days } })
 export const recomputeVix = () => api.post('/vix/recompute')
-export const getVixRecomputeStatus = () => api.get('/vix/recompute_status')
 export const backfillVix = (days = 30, skip_existing = true) =>
   api.post('/vix/backfill', { days, skip_existing })
-export const getVixBackfillStatus = () => api.get('/vix/backfill_status')
 
 // 舆情 v3 升级（2026-06-06）：时序因子 + 热门股池
 export const getSentimentIndicators = (code, days = 30) =>

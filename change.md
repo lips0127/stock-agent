@@ -2,6 +2,36 @@
 
 ## 2026-06-28
 
+### VIX 算法 v6 / v6.1 — 多 ETF 合成生效 + 评审采纳调整
+
+**症状**:
+1. **多 ETF 合成从未生效（P0）**: `fetch_multi_etf_qvix` 判断 `"iv_close" in df.columns`，但 akshare 的 `index_option_300etf_qvix()` 等返回列名是 `close`（仅 50ETF 单独 rename 成 `iv_close`）。5 个 ETF 全被跳过，VIX 主体一直回退到单一 50ETF。
+2. **平稳日不敏感**: VIX 主体是波动最低的宽基 50ETF，且 composite 里 VIX 实际贡献仅约 14%，微动被现货位置淹没。
+3. **回填性能**: 每个交易日重拉腾讯全量历史（~50s/天），356 天回填 ~4h。
+4. **回填污染**: 多 ETF 失败时仍写入降级数据，污染 Z-Score/百分位基线。
+
+**修复（v6）**:
+- 修列名 bug（`close`），5 ETF 真正合成；返回按日对齐的 synthetic 序列（prev/prev2/high/low）。
+- 新增两个快信号：`_vix_change_to_score`（日变化率）、`_vix_swing_to_score`（日内振幅）。
+- 腾讯历史进程级 TTL 缓存（→1800s）+ margin 缓存，回填 ~2s/天。
+
+**结构性调整（v6.1，采纳 GPT/Gemini 双评审）**:
+1. ETF 等权 → 代表性加权 50/300/500/创业板/科创 = 20/30/20/15/15%（按当日可用列归一化）。
+2. 新增宽基/成长拆分 `vix_broad`/`vix_growth`/`vix_growth_premium`（区分系统性风险 vs 风格杀估值）。
+3. composite = FG×60% + 现货×40%（提高前瞻话语权）。
+4. 快信号 20%→15% 且变化率做 2 日平滑，回补给 VIX 水平（→30%）。
+5. 日内振幅改「单 ETF 振幅% → 加权」（避免拼接非同时点极值造出虚假全天恐慌）。
+
+**收尾**:
+- `compute_today_snapshot(require_multi=True)`: 多 ETF 失败则跳过、保留旧值（不写降级数据）。
+- `recompute_percentiles(window=252)`: 回填后按 point-in-time（往前 252 交易日）统一重算百分位/regime。
+- 前端 `VixTrendChart` 仅信任 `vix_source=='multi_etf'` 行，`connectNulls:false`（无数据断线不画假直线）；回填按钮加确认弹窗。
+- 数据边界拓展至 2025-01-01（356 交易日）；前端轮询改用 `getTask(taskId)`（旧 `*_status` 端点已 410）。
+
+**为什么**: 这是「A股恐惧贪婪/风险偏好指数」而非严格 CBOE VIX 复制品。ML 自动定权重留待后续作为独立预测叠加层，不替换可解释的温度计主输出。详见 SPEC.md §11D/§11E。
+
+---
+
 ### 修复 ST/*ST/退市股污染高股息排名
 
 **症状**: 全量扫描把 ST、*ST、退市股纳入排名，得到 277%、128% 等异常股息率（股价崩塌但分红按往年正常水平计算）。

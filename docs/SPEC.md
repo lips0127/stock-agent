@@ -1485,6 +1485,116 @@ ALTER TABLE vix_history ADD COLUMN limit_source TEXT;
 - **Z-Score 在新系统前 252 天**：`compute_vix_zscore` 数据不足 20 天时返回 0.0（中性）
 - **regime 基于百分位而非绝对值**：跨系统/跨周期比较时不再直观（同一数值的 regime 可能不同）
 
+## 11D. VIX 算法 v6 — 合成生效 + 敏感度增强（2026-06-28）
+
+### 11D.1 设计动机
+
+v5 设计完整，但上线后存在三类问题（本次排查实证）：
+
+1. **多 ETF 合成从未生效（P0 bug）**：`fetch_multi_etf_qvix` 判断 `"iv_close" in df.columns`，但 akshare 的 `index_option_300etf_qvix()` 等函数返回列名是 `close`（仅 `fetch_50etf_qvix` 单独 rename 成 `iv_close`）。结果 5 个 ETF 全被跳过，函数永远返回 `None`，VIX 主体一直回退到单一 50ETF。前端显示「当前 0 个有效」「VIX 主体回退 iv」即此因。
+2. **平稳日不敏感**：① 受 bug 影响，VIX 主体是波动最低的宽基 50ETF；② composite = FG×40% + 现货×60%，FG 里 VIX 仅 35% → VIX 对 composite 实际贡献仅约 14%，平稳日微动被现货位置淹没。
+3. **回填性能**：`get_spot_signals_for_date` 每个交易日都重拉腾讯全量历史（~50s/天），250 天回填需 ~4h，按钮形同虚设。
+
+### 11D.2 核心变更
+
+| # | 变更 | 旧 (v5) | 新 (v6) |
+|---|------|---------|---------|
+| 1 | 多 ETF 列名 | `iv_close`（不存在）→ 合成失效 | `close`（正确）→ 5 ETF 真正等权合成 |
+| 2 | 合成 VIX 序列 | 仅取末值 | 按日期对齐的 synthetic 序列，附带 prev/high/low |
+| 3 | VIX 日变化率信号 | 无 | 新增 `_vix_change_to_score`（权重 12%） |
+| 4 | VIX 日内振幅信号 | 无 | 新增 `_vix_swing_to_score`（权重 8%） |
+| 5 | FG 权重 | VIX35/RV15/PCR15/Margin15/Limit20 | VIX25/VIXchg12/VIXswing8/RV12/PCR13/Margin10/Limit20 |
+| 6 | composite 拆分 | FG40% + 现货60% | FG50% + 现货50% |
+| 7 | 回填性能 | 每天重拉全量历史（~50s/天） | 腾讯全量历史 60s TTL 进程缓存（整轮拉一次） |
+
+变更后 VIX 对 composite 的实际贡献从约 14% 提升到约 22.5%（FG 内 VIX 类 45% × composite 内 FG 50%），且变化率/振幅快信号让平稳日的边际情绪转向可被捕捉。
+
+### 11D.3 v6 FG 权重表
+
+| 分量 | 权重 | 数据源 | 缺失兜底 |
+|------|------|--------|----------|
+| 合成 VIX（水平，Z-Score 中心） | 25% | 5 ETF QVIX 等权 | 中性 50 |
+| VIX 日变化率 | 12% | synthetic 日环比 | 中性 50（无 prev 时） |
+| VIX 日内振幅 | 8% | synthetic high/low 等权 | 中性 50 |
+| RV 变化 | 12% | HS300+ZZ1000 Garman-Klass | 中性 50 |
+| PCR | 13% | 上交所 option_daily_stats_sse | 中性 50 |
+| 融资融券变化 | 10% | 沪深两市 margin | 中性 50 |
+| 涨跌停家数比 | 20% | 涨停池+跌停池 | 中性 50 |
+
+缺失分量权重按 active_weight 归一化分摊到可用分量。
+
+### 11D.4 新信号算法
+
+```
+_vix_change_to_score(curr, prev):  # VIX 上升=恐慌=低分
+    chg% = (curr - prev) / prev × 100
+    return 100 / (1 + exp(0.12 × chg))      # chg=+10%→23, 0→50, -10%→77
+
+_vix_swing_to_score(high, low, close):     # 盘中振幅大=恐慌=低分
+    swing% = (high - low) / close × 100
+    return clamp(50 - (swing - 6) × 4, 5, 95)  # swing=6%→50, 16%→10
+```
+
+注：`synthetic_high/low` 为各 ETF 当日 high/low 的等权（非同时点极值），偏保守高估，仅作相对信号使用。
+
+### 11D.5 数据源/服务/前端改动
+
+| 模块 | 文件 | 改动 |
+|------|------|------|
+| 数据源 | `backend/data/vix_sources.py` | `fetch_multi_etf_qvix` 修列名 bug + 返回 synthetic 序列(prev/high/low) + `as_of` 参数；`fetch_index_daily_tx` 加 60s TTL 缓存 |
+| 计算服务 | `backend/services/vix_service.py` | 新增 `_vix_change_to_score`/`_vix_swing_to_score`；`compute_fear_greed` v6 7 分量权重；`compute_composite_score` 50/50；snapshot 计算变化率/振幅；`snapshot_to_api` 暴露 `vix_change_pct`/`vix_swing_pct`；`_version=v6` |
+| 前端详情页 | `frontend/src/views/VixView.vue` | 合成 VIX 卡片新增「日变化/振幅」行；轮询改用 `getTask(taskId)`（旧 `*_status` 端点已 410） |
+| 前端仪表盘 | `frontend/src/views/DashboardView.vue` | 重算轮询改用 `getTask(taskId)` |
+| 前端 API | `frontend/src/api/index.js` | 删除 `getVixRecomputeStatus`/`getVixBackfillStatus`（指向 410 端点） |
+
+### 11D.6 已知限制
+
+- `synthetic_high/low` 为各 ETF 极值等权，非同一时点，振幅信号偏保守
+- 全量 v6 回填前，历史 `vix` 仍是旧单 50ETF 基线（~17），与新合成（~33）混算会使 Z-Score/百分位短时失真；**全量回填覆盖后自愈**
+- 腾讯历史缓存 TTL 60s：单次回填整轮共享一份，跨任务/盘后实时计算不受影响
+
+## 11E. VIX 算法 v6.1 — 评审采纳调整（2026-06-28）
+
+### 11E.1 背景
+
+v6 上线后将设计提交 GPT / Gemini 双评审，两者结论高度收敛：方向对（这是「A股恐惧贪婪/风险偏好指数」而非严格 CBOE VIX 复制品），但有 5 处可立刻改进。v6.1 全部采纳。ML 自动定权重的方向另案处理（不在本次范围）。
+
+### 11E.2 五项调整
+
+| # | 调整 | v6 | v6.1 | 理由 |
+|---|------|-----|------|------|
+| 1 | ETF 合成权重 | 等权（各 20%，创业板+科创占 40%） | 50/300/500/创业板/科创 = 20/30/20/15/15% | 等权让高波动的成长 ETF 过度主导，把「全市场恐慌」做成「成长股恐慌」；改代表性加权（市值+期权流动性深度）。权重按当日可用 ETF 重新归一化 |
+| 2 | 宽基/成长拆分 | 无 | 新增 `vix_broad`(50+300+500) / `vix_growth`(创业板+科创) / `vix_growth_premium`(成长−宽基) | 区分系统性风险 vs 风格杀估值。如 2026-06-26：synthetic 31.1，但 broad 23.9 / growth 47.9 / premium +24，说明是成长局部恐慌而非全市场冰点 |
+| 3 | composite 拆分 | FG 50% + 现货 50% | FG 60% + 现货 40% | FG（期权 IV/PCR）前瞻，现货均线/动量同步且与涨跌停/融资重复计量；提高前瞻话语权，避免趋势行情被现货拖偏 |
+| 4 | 快信号权重 + 平滑 | 变化率 12% + 振幅 8% = 20%，单日值 | 变化率 9% + 冲击 6% = 15%；变化率做 2 日平滑 | 快信号噪声大；降权 + 平滑过滤单日扰动，回补给 VIX 水平（25%→30%） |
+| 5 | 日内振幅算法 | 先拼各 ETF high/low 等权再算振幅 | 单 ETF 各自振幅% → 加权（重命名「跨 ETF 波动冲击强度」） | 各 ETF 极值非同时点，先拼会造出「虚假全天恐慌」；正确顺序是单 ETF 标准化→合成 |
+
+### 11E.3 v6.1 FG 权重表
+
+| 分量 | 权重 | 备注 |
+|------|------|------|
+| 合成 VIX（水平，Z-Score 中心） | 30% | 代表性加权 |
+| VIX 日变化率（2 日平滑） | 9% | 快信号，从序列内派生 |
+| VIX 波动冲击强度 | 6% | 单 ETF 振幅%加权 |
+| RV 变化 | 12% | HS300+ZZ1000 Garman-Klass |
+| PCR | 13% | 上交所 option_daily_stats_sse |
+| 融资融券变化 | 10% | 沪深两市 margin |
+| 涨跌停家数比 | 20% | 涨停池+跌停池 |
+
+`composite = FG × 60% + 现货位置 × 40%`。VIX 类对 composite 实际贡献约 27%（FG 内 VIX 相关 45% × 60%）。
+
+### 11E.4 实现要点
+
+- `vix_sources.fetch_multi_etf_qvix`：`ETF_WEIGHTS` 加权 + `_weighted_last` 按可用列归一化；返回 `broad/growth/growth_premium/swing_pct/synthetic_prev2`
+- 变化率 2 日平滑全部从 QVIX 序列内派生（用 `synthetic_prev`/`synthetic_prev2`），**回填顺序无关**，不依赖 DB 中可能未就位的行
+- `recompute_percentiles()`：回填收尾统一按 point-in-time（该行往前 252 交易日）口径重算 `composite_percentile` + `composite_regime`，修正 oldest→newest 回填早期行的百分位失真
+- 数据边界拓展至 **2025-01-01**（356 交易日）；前端下拉新增 360 天选项
+- `_version = "v6.1"`；新增 API 字段 `vix_broad`/`vix_growth`/`vix_growth_premium`
+
+### 11E.5 未采纳 / 留待后续
+
+- **ML 自动定权重**（用户提出）：以「输入=各分量权重，目标=预测未来 7 天指数涨跌」训练模型。结论是**另开会话单独做**，且应作为独立「预测叠加层」而非替换可解释的温度计主输出（避免身份危机：温度计描述「现在多恐慌」vs 预测器预测「未来涨跌」）。关键约束：7 天重叠标签样本自相关需 purged walk-forward 验证；QVIX 可回溯 2015，但 PCR/涨跌停/融资的联合可用历史待验证
+
 ## 11. 舆情标题真实性审计（v1, 2026-06-04）
 
 ### 11.1 目标
