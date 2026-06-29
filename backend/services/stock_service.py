@@ -4,7 +4,6 @@ A 股股息率监测 - 数据逻辑层
 使用 akshare 获取股票名称、最新价、股息率。
 """
 
-import os
 import time
 import pandas as pd
 from contextlib import contextmanager
@@ -12,53 +11,106 @@ import requests
 import akshare as ak
 import logging
 
-from backend.config import SINA_HQ_URL, SINA_REFERER, SINA_TIMEOUT, SINA_INDEX_TIMEOUT
+from backend.config import (
+    SINA_HQ_URL, SINA_REFERER, SINA_TIMEOUT, SINA_INDEX_TIMEOUT,
+    TENCENT_HQ_URL, TENCENT_TIMEOUT,
+    BROWSER_USER_AGENT,
+    HQ_SOURCE_RETRIES, HQ_SOURCE_RETRY_BACKOFF,
+)
 
 logger = logging.getLogger(__name__)
 
-# 代理相关环境变量
+
+def _retry(do, retries: int = None, backoff: float = None):
+    """对瞬时网络错误（连接重置/超时/5xx）做指数退避重试。
+
+    数据格式错误（4xx、空响应）不重试，直接抛。
+    """
+    if retries is None:
+        retries = HQ_SOURCE_RETRIES
+    if backoff is None:
+        backoff = HQ_SOURCE_RETRY_BACKOFF
+
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            r = do()
+            # 5xx 视为服务端瞬时错误
+            if r.status_code >= 500 and attempt < retries:
+                last_exc = ValueError(f"HTTP {r.status_code}")
+                time.sleep(backoff * (2 ** attempt))
+                continue
+            return r
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ChunkedEncodingError) as e:
+            last_exc = e
+            if attempt < retries:
+                time.sleep(backoff * (2 ** attempt))
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+
+
+def is_risk_stock(name: str) -> bool:
+    """判定是否为 ST / *ST / 退市股票（按名称）。
+
+    这类股票价格已严重脱离基本面（退市整理期股价常跌至 1 元以下），但
+    历史分红仍按往年正常水平计算，会得到 100%+ 的异常股息率，污染高股息
+    排名；且其本身存在退市/摘牌风险，不应进入选股池，故在扫描与展示两层
+    一并排除。
+    """
+    if not name:
+        return False
+    upper = name.upper()
+    return "ST" in upper or "退" in name
+
+
+def _full_symbol(symbol: str) -> str:
+    """根据 6 位股票代码返回带市场前缀的代码（sh/sz/bj）。"""
+    if symbol.startswith("6"):
+        return f"sh{symbol}"
+    if symbol.startswith(("0", "3")):
+        return f"sz{symbol}"
+    if symbol.startswith(("4", "8", "9")):
+        return f"bj{symbol}"
+    return f"sh{symbol}"
+
+
+# ── 代理相关环境变量 ──
+# 注意（2026-06-15）：代理强制直连的 monkey-patch 已迁移到
+# ``backend.core.proxy_bypass``，在 ``backend.api.app`` 启动时执行。
+# 这里的 ``_no_proxy()`` 改为 no-op，向后兼容 ``with _no_proxy():`` 语法。
+# 实际保护由全局 patch 提供（覆盖 requests / akshare / urllib3 所有出口）。
 _PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
 
 
 @contextmanager
 def _no_proxy():
-    """临时取消代理，退出时恢复。
+    """no-op 上下文管理器（v3，2026-06-15）。
 
-    同时处理环境变量代理和 Windows 系统代理（requests 可能通过
-    system proxy settings 走代理，即使环境变量为空），
-    因此还需要 monkey-patch requests.Session 强制禁用代理。
+    历史背景：v1/v2 是临时 patch Session.request 的实现，但要求所有
+    外网调用点都被 ``with _no_proxy():`` 包裹，否则仍会走代理。
+    修复后全局 patch 在 ``backend.api.app`` 启动时一次生效，调用点
+    仍然可以写 ``with _no_proxy():`` 用来**显式标注**「这里不应走
+    代理」的设计意图，但不再依赖它来实际保护。
     """
-    backup = {k: os.environ.pop(k, None) for k in _PROXY_KEYS}
-    _orig_request = requests.Session.request
-    def _patched_request(self, method, url, **kwargs):
-        kwargs.setdefault('proxies', {'http': None, 'https': None})
-        return _orig_request(self, method, url, **kwargs)
-    requests.Session.request = _patched_request
-    try:
-        yield
-    finally:
-        requests.Session.request = _orig_request
-        for k, v in backup.items():
-            if v is not None:
-                os.environ[k] = v
+    yield
+
 
 
 def _get_sina_hq(symbol: str) -> dict:
     """从新浪财经获取名称和最新价。"""
-    if symbol.startswith("6"):
-        full_symbol = f"sh{symbol}"
-    elif symbol.startswith(("0", "3")):
-        full_symbol = f"sz{symbol}"
-    elif symbol.startswith(("4", "8", "9")):
-        full_symbol = f"bj{symbol}"
-    else:
-        full_symbol = f"sh{symbol}"
-
+    full_symbol = _full_symbol(symbol)
     url = f"{SINA_HQ_URL}{full_symbol}"
-    headers = {"Referer": SINA_REFERER}
+    headers = {"Referer": SINA_REFERER, "User-Agent": BROWSER_USER_AGENT}
 
-    with _no_proxy():
-        r = requests.get(url, headers=headers, timeout=SINA_TIMEOUT)
+    def _do():
+        with _no_proxy():
+            return requests.get(url, headers=headers, timeout=SINA_TIMEOUT)
+
+    r = _retry(_do)
 
     if r.status_code != 200 or len(r.text) < 50:
         raise ValueError(f"无法从新浪获取股票 {symbol} 的行情")
@@ -75,38 +127,55 @@ def _get_sina_hq(symbol: str) -> dict:
         raise ValueError(f"解析新浪行情失败: {symbol}")
 
 
+def _get_tencent_hq(symbol: str) -> dict:
+    """从腾讯财经获取名称和最新价（首选数据源，HTTPS 最稳定）。"""
+    full_symbol = _full_symbol(symbol)
+    url = f"{TENCENT_HQ_URL}{full_symbol}"
+    headers = {"User-Agent": BROWSER_USER_AGENT}
+
+    def _do():
+        with _no_proxy():
+            return requests.get(url, headers=headers, timeout=TENCENT_TIMEOUT)
+
+    r = _retry(_do)
+
+    if r.status_code != 200:
+        raise ValueError(f"腾讯返回非 200: {r.status_code} ({symbol})")
+
+    # 响应格式: v_sz001210="51~名称~代码~当前价~昨收~开盘~...";
+    # 退市/未上市的代码可能返回 v_xxxx=""; ，整段 payload 为空
+    payload = r.text.split('"', 2)
+    if len(payload) < 2 or not payload[1].strip():
+        raise ValueError(f"腾讯返回空数据: {symbol}")
+
+    try:
+        parts = payload[1].split('~')
+        # 字段约定: [0]=市场标记 [1]=名称 [3]=当前价
+        if len(parts) < 4:
+            raise ValueError
+        name = parts[1]
+        latest_price = float(parts[3])
+        if latest_price <= 0:
+            raise ValueError(f"腾讯无有效价格: {symbol}")
+        return {"name": name, "price": latest_price}
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError(f"解析腾讯行情失败: {symbol}")
+
+
 def _get_eastmoney_hq(symbol: str) -> dict:
-    """从东方财富获取名称和最新价（备用数据源）。"""
-    # 东方财富 secid 格式: market.code
-    # SH=1, SZ=0, BJ=0
-    if symbol.startswith(("6", "68")):
-        secid = f"1.{symbol}"
-    elif symbol.startswith(("0", "3", "4", "8", "9")):
-        secid = f"0.{symbol}"
-    else:
-        secid = f"1.{symbol}"
+    """从东方财富 secid 接口获取名称和最新价（push2 域，2026-06-16 标记为不可用）。
 
-    url = "http://push2.eastmoney.com/api/qt/stock/get"
-    params = {
-        "secid": secid,
-        "fields": "f57,f58,f43",
-        "ut": "fa5fd1943c7b386f172d6893dbfccf91",
-    }
-
-    with _no_proxy():
-        r = requests.get(url, params=params, timeout=SINA_TIMEOUT)
-
-    data = r.json()
-    item = data.get("data")
-    if not item:
-        raise ValueError(f"东方财富返回空数据: {symbol}")
-
-    name = item.get("f58", "")
-    price = item.get("f43")
-    if price is None or price == "-" or float(price) <= 0:
-        raise ValueError(f"东方财富无有效价格: {symbol}")
-
-    return {"name": name, "price": float(price)}
+    状态：用户本地网络对 push2.eastmoney.com 域持续 RST（裸 socket/curl
+    同样失败，非代理问题）。保留函数定义以便其他文件 ``import`` 不破，
+    但调用永远会抛 ConnectionError — ``get_stock_metrics`` 的兜底链已
+    移除本函数（见 v3 改动）。任何新代码**不要**调用本函数。
+    """
+    raise ConnectionError(
+        "eastmoney push2.eastmoney.com 域在当前网络下不可用（2026-06-16），"
+        "请改用 sina/tencent 数据源"
+    )
 
 
 def get_sina_index_spot(symbol: str) -> dict:
@@ -154,9 +223,14 @@ def get_stock_metrics(symbol: str) -> dict:
     """根据 6 位股票代码获取名称、最新价、股息率、每股分红和分红备注。"""
     symbol = str(symbol).strip().zfill(6)
 
-    # 多数据源获取名称和最新价：新浪 → 东方财富
+    # 多数据源获取名称和最新价：腾讯（HTTPS 最稳） → 新浪
+    # 注（v3, 2026-06-16）：东方财富 push2 域对当前网络持续 RST，已从
+    # 兜底链移除，保留 _get_eastmoney_hq 仅作占位（永远抛 ConnectionError）。
     hq = None
-    sources = [("新浪", _get_sina_hq), ("东方财富", _get_eastmoney_hq)]
+    sources = [
+        ("腾讯", _get_tencent_hq),
+        ("新浪", _get_sina_hq),
+    ]
     errors = []
 
     for src_name, fetch_fn in sources:
@@ -177,9 +251,12 @@ def get_stock_metrics(symbol: str) -> dict:
     if latest_price <= 0:
         try:
             with _no_proxy():
-                df_hist = ak.stock_zh_a_hist(symbol=symbol, period="daily", adjust="qfq")
+                df_hist = ak.stock_zh_a_daily(
+                    symbol=f"sh{symbol}" if symbol.startswith(("6", "9")) else f"sz{symbol}",
+                    adjust="qfq",
+                )
                 if df_hist is not None and not df_hist.empty:
-                    latest_price = float(df_hist.iloc[-1]["收盘"])
+                    latest_price = float(df_hist.iloc[-1]["close"])
         except Exception as e:
             logger.warning(f"获取 {symbol} 历史价格失败，将使用当前价 0: {e}", exc_info=True)
 
