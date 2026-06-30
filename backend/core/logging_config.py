@@ -1,27 +1,47 @@
 import logging
+import logging.handlers
+import os
 import sys
 from pathlib import Path
 from backend.config import LOG_LEVEL, LOG_DIR
 
 
-class Log4jFormatter(logging.Formatter):
-    """Log4j 风格的日志格式化器。
+class WindowsSafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """Windows 兼容的 RotatingFileHandler，处理文件锁定错误。"""
 
-    格式: 2026-05-10 15:30:45 [线程名] INFO  模块名 - 消息
+    def doRollover(self):
+        try:
+            super().doRollover()
+        except PermissionError:
+            # Windows 下旧日志文件可能被其他进程持有，跳过轮转
+            pass
+
+
+class TaskAwareFormatter(logging.Formatter):
+    """日志格式化器，自动注入 task_run_id（Phase A, 2026-06-10）。
+
+    格式: 2026-05-10 15:30:45 [线程名] [task=xxxxxxxx] INFO  模块名 - 消息
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        # 简化模块名（取最后一个点后的部分，更像 Log4j 的类名风格）
+        from backend.core.task_runner import current_task_run_id
+
+        run_id = current_task_run_id.get()
+        record.task_run_id = run_id[:8] if run_id else "--------"
+
         logger_name = record.name
-        if '.' in logger_name:
-            logger_name = logger_name.split('.')[-1]
+        if "." in logger_name:
+            logger_name = logger_name.split(".")[-1]
 
         timestamp = self.formatTime(record, "%Y-%m-%d %H:%M:%S")
         thread_name = record.threadName or "MainThread"
-        level = record.levelname.ljust(5)  # 左对齐，INFO/WARN/ERROR
+        level = record.levelname.ljust(5)
         msg = record.getMessage()
 
-        result = f"{timestamp} [{thread_name}] {level} {logger_name} - {msg}"
+        result = (
+            f"{timestamp} [{thread_name}] [task={record.task_run_id}] "
+            f"{level} {logger_name} - {msg}"
+        )
         if record.exc_info and record.exc_info[0] is not None:
             result += "\n" + self.formatException(record.exc_info)
         return result
@@ -39,21 +59,27 @@ def setup_logging() -> None:
     for h in root_logger.handlers[:]:
         root_logger.removeHandler(h)
 
-    # 应用日志：stdout + 文件
-    log4j_fmt = Log4jFormatter()
+    fmt = TaskAwareFormatter()
+
+    # stdout
     stdout_handler = logging.StreamHandler(sys.stdout)
-    stdout_handler.setFormatter(log4j_fmt)
+    stdout_handler.setFormatter(fmt)
     root_logger.addHandler(stdout_handler)
 
-    file_handler = logging.FileHandler(
-        log_dir / "app.log", encoding="utf-8", delay=True
+    # 文件：RotatingFileHandler（10MB × 5 保留）
+    file_handler = WindowsSafeRotatingFileHandler(
+        log_dir / "app.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+        delay=True,
     )
-    file_handler.setFormatter(log4j_fmt)
+    file_handler.setFormatter(fmt)
     root_logger.addHandler(file_handler)
 
-    # werkzeug: 只显示 WARNING+（隐藏每条 HTTP 请求的噪音行），但显示路由错误
-    logging.getLogger("werkzeug").setLevel(logging.WARNING)
-
-    # urllib3/apscheduler 安静
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("apscheduler").setLevel(logging.WARNING)
+    # 压制第三方库噪声
+    for noisy in (
+        "werkzeug", "urllib3", "apscheduler", "akshare",
+        "httpx", "httpcore", "matplotlib",
+    ):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

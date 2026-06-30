@@ -115,3 +115,24 @@ class StrategyContext:
             reason=reason,
         )
         self._event_bus.publish(event)
+
+    # ── 舆情因子接入（v3, 2026-06-06）─────────────────────
+
+    def get_sentiment_indicator(self, symbol: str, days: int = 1) -> dict | None:
+        """读取某只股票最近 N 日的时序因子（含 panic/euphoria/EMA）。
+
+        返回 dict：{date, score, ema3, ema5, panic_signal, euphoria_signal,
+                   momentum_cross, bullish_ma30, bearish_ma30, ...}
+        没有数据时返回 None。
+
+        用法示例（反向下单策略）：
+            ind = ctx.get_sentiment_indicator(symbol, days=1)
+            if ind and ind["panic_signal"] == 1:
+                ctx.buy(symbol, qty)
+        """
+        try:
+            from backend.core.database import get_indicators
+            rows = get_indicators(symbol, days=days)
+            return rows[-1] if rows else None
+        except Exception:
+            return None

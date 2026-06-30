@@ -7,12 +7,341 @@ import re
 import json
 import time
 import logging
+import threading
 import requests
 from datetime import datetime
-from backend.core.database import get_connection
+from backend.core.database import get_connection, get_sentiment_filters
 from backend.services.stock_service import _no_proxy
+from backend.config import (
+    GUBA_CB_FAILURE_THRESHOLD, GUBA_CB_COOLDOWN_SECONDS,
+    GUBA_HTTP_RETRIES, GUBA_HTTP_RETRY_BACKOFF,
+)
 
 logger = logging.getLogger(__name__)
+
+# 预置过滤关键词（fallback when DB unavailable）
+_DEFAULT_FILTER_KEYWORDS = ["转发", "阅读", "股吧", "收藏", "发表于"]
+
+
+# ── 共享 Session + Cookie 预热（v2, 2026-06-06） ──────────────────────────
+# 2026-06 之后 guba 详情页增加了 cookie 鉴权：未携带 qgqp_b_id / st_nvi / nid18 /
+# gviem 等老访客 cookie 时，详情页（news,X,Y.html）只返回 ~2.8KB 的引导壳
+# （<div id="root"> + fd_guba_validate 资源），里头没有 post_article JSON。
+# 列表页（list,X.html）不受影响。
+#
+# 修复策略（v2, 2026-06-06）：
+# 1. 启动时直接注入一组 bootstrap cookies（从真实浏览器会话提取）→ 立即可用
+# 2. 跨请求复用同一个 requests.Session，自动维护 cookie 生命周期
+# 3. 详情页返回 ~2.8KB 引导壳时（cookie 失效），重置 bootstrap 并尝试重新 warmup
+# 4. 重新 warmup 失败则降级为 audit_status=pending，等下次或人工介入
+
+# 来自真实浏览器会话的 anti-bot cookies（2026-06-06 提取）。
+# 这些 cookie 是 guba 域通用的反爬标识，不绑定用户；首次访问时直接注入。
+_GUBA_BOOTSTRAP_COOKIES = {
+    "qgqp_b_id": "3887f38c95c6219c78d2d464d13dc25b",
+    "st_nvi": "YdymadBWtzSdSD6mf1GEVb9eb",
+    "nid18": "0aef0cce8a96f5f392327a39a2262793",
+    "gviem": "I62K01Ig9bRhbCKTIvTSn70c6",
+    "st_si": "83268578334050",
+    "st_pvi": "06154531581302",
+    "st_sp": "2026-06-06 12:59:54",
+    "st_inirUrl": "https://guba.eastmoney.com/list,600584.html",
+    "st_sn": "1",
+    "st_psi": "20260606131646400-117001354293-2377644603",
+    "st_asi": "delete",
+}
+
+_GUBA_SESSION = requests.Session()
+_GUBA_SESSION.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8,"
+        "application/signed-exchange;v=b3;q=0.7"
+    ),
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+})
+
+
+def _inject_bootstrap_cookies() -> None:
+    """把 _GUBA_BOOTSTRAP_COOKIES 注入到 _GUBA_SESSION。"""
+    for k, v in _GUBA_BOOTSTRAP_COOKIES.items():
+        _GUBA_SESSION.cookies.set(k, v, domain=".eastmoney.com")
+
+
+# 启动时立即注入一次
+_inject_bootstrap_cookies()
+
+_GUBA_WARMED_UP = True  # 标记：bootstrap 已就绪
+_GUBA_WARMUP_LOCK = threading.Lock()
+# cookie 健康度（v7 2026-06-29）：warmup 后详情页仍返回引导壳 → cookie 过期。
+# warmup 只是重新注入同一组硬编码 cookie，无法真正刷新；置 stale 后由前端告警，
+# 需人工从浏览器重新提取 cookie 更新 _GUBA_BOOTSTRAP_COOKIES 并重启。
+_COOKIE_STALE = False
+# 引导壳告警节流（v8 2026-06-30）：cookie 过期后，每个详情页请求都会返回引导壳。
+# 旧逻辑每次都做无意义 warmup + 打 2 行日志 → 1000+ 只股票刷屏。改为：
+# stale 后静默降级；一次性 error 日志最多每 5 分钟重复一次，防多线程竞争刷屏。
+_SHELL_WARN_INTERVAL = 300.0
+_last_shell_warn_ts = 0.0
+
+
+def _warmup_guba_session() -> bool:
+    """重新注入 bootstrap cookies（cookie 失效时调用）。
+
+    guba 的反爬墙基于 cookie 鉴权：未携带 qgqp_b_id / st_nvi / nid18 /
+    gviem 等老访客 cookie 时，详情页（news,X,Y.html）只返回 ~2.8KB 引导壳。
+
+    Returns:
+        True 注入成功（详情页能拿到 post_article JSON）；
+        False 注入失败。
+    """
+    global _GUBA_WARMED_UP
+    with _GUBA_WARMUP_LOCK:
+        try:
+            _inject_bootstrap_cookies()
+            cookies = list(_GUBA_SESSION.cookies.keys())
+            logger.info(f"[guba 预热] 重新注入 cookie 成功，当前 {len(cookies)} 个")
+            _GUBA_WARMED_UP = True
+            return True
+        except Exception as e:
+            logger.warning(f"[guba 预热] 失败: {e}")
+            return False
+
+
+# ── 网络韧性：熔断器 + 重试（v1, 2026-06-04） ──────────────────────────
+
+class CircuitOpenError(Exception):
+    """熔断器打开时抛出的异常，调用方应立即跳过。"""
+
+
+class GubaCircuitBreaker:
+    """guba.eastmoney.com 主机级熔断器。
+
+    状态机：closed → open → half_open → closed
+    - 连续 N 次网络失败 → 打开（fast-fail 后续请求，避免 15s×N 等待）
+    - 冷却 cooldown 秒后 → half_open（允许 1 个探测请求）
+    - 探测成功 → closed；失败 → 重新打开
+    """
+
+    def __init__(self, failure_threshold: int = None, cooldown_seconds: float = None):
+        self.failure_threshold = failure_threshold or GUBA_CB_FAILURE_THRESHOLD
+        self.cooldown_seconds = cooldown_seconds or GUBA_CB_COOLDOWN_SECONDS
+        self._state = "closed"
+        self._failures = 0
+        self._opened_at = 0.0
+        self._lock = threading.Lock()
+
+    def call(self, fn, *args, **kwargs):
+        with self._lock:
+            if self._state == "open":
+                elapsed = time.time() - self._opened_at
+                if elapsed > self.cooldown_seconds:
+                    self._state = "half_open"
+                else:
+                    raise CircuitOpenError(
+                        f"guba.eastmoney.com 熔断中（剩余 {self.cooldown_seconds - elapsed:.0f}s）"
+                    )
+        try:
+            result = fn(*args, **kwargs)
+        except (requests.RequestException, CircuitOpenError):
+            self._on_failure()
+            raise
+        self._on_success()
+        return result
+
+    def _on_success(self):
+        with self._lock:
+            if self._state != "closed":
+                logger.info(f"[guba 熔断] 探测成功，恢复 closed (前状态={self._state})")
+            self._state = "closed"
+            self._failures = 0
+
+    def _on_failure(self):
+        with self._lock:
+            self._failures += 1
+            if self._state == "half_open":
+                # 探测失败 → 重新打开
+                self._state = "open"
+                self._opened_at = time.time()
+                logger.warning(f"[guba 熔断] 探测失败，重新打开 (cooldown={self.cooldown_seconds}s)")
+            elif self._failures >= self.failure_threshold:
+                self._state = "open"
+                self._opened_at = time.time()
+                logger.warning(
+                    f"[guba 熔断] 连续 {self._failures} 次失败，打开熔断 "
+                    f"(cooldown={self.cooldown_seconds}s)"
+                )
+
+    @property
+    def state(self) -> dict:
+        with self._lock:
+            if self._state == "open":
+                remaining = max(0, self.cooldown_seconds - (time.time() - self._opened_at))
+            else:
+                remaining = 0
+            return {
+                "state": self._state,
+                "failures": self._failures,
+                "cooldown_seconds": self.cooldown_seconds,
+                "cooldown_remaining": remaining,
+            }
+
+    def reset(self):
+        """手动重置熔断器（用于测试 / 运维）。"""
+        with self._lock:
+            self._state = "closed"
+            self._failures = 0
+            self._opened_at = 0.0
+            logger.info("[guba 熔断] 手动重置")
+
+
+# 模块级单例：所有 guba 请求共享同一个熔断器
+_GUBA_CIRCUIT = GubaCircuitBreaker()
+
+
+def _http_get_with_retry(url: str, headers: dict, timeout: int,
+                         retries: int = None, backoff: float = None) -> requests.Response:
+    """带指数退避的 GET 重试（封装 _GUBA_CIRCUIT.call）。
+
+    行为：
+    - 走熔断器：熔断打开时立即 raise CircuitOpenError（< 1ms）
+    - 网络异常（ConnectionError / Timeout / ChunkedEncodingError）→ 指数退避重试
+    - 5xx / 429 → 同样重试
+    - 4xx（除 429）→ 不重试，不计入熔断失败（反爬响应）
+    - 200 但返回 ~2.8KB 引导壳（cookie 鉴权）→ 重置 warmup 标志，触发列表页预热后再试一次
+
+    Args:
+        url: 请求 URL
+        headers: HTTP 头（一般用不上，cookie 由共享 Session 维护）
+        timeout: 超时秒数
+        retries: 重试次数（不含首次），默认 GUBA_HTTP_RETRIES
+        backoff: 退避基数秒，默认 GUBA_HTTP_RETRY_BACKOFF
+    """
+    if retries is None:
+        retries = GUBA_HTTP_RETRIES
+    if backoff is None:
+        backoff = GUBA_HTTP_RETRY_BACKOFF
+
+    def _do():
+        with _no_proxy():
+            # 用共享 Session 自动带上 cookie
+            return _GUBA_SESSION.get(url, timeout=timeout)
+
+    last_exc = None
+    warmed_retry_done = False
+    for attempt in range(retries + 1):
+        try:
+            r = _GUBA_CIRCUIT.call(_do)
+            # 5xx / 429 视为服务端瞬时错误，重试
+            if r.status_code == 429 or r.status_code >= 500:
+                if attempt < retries:
+                    sleep_s = backoff * (2 ** attempt)
+                    logger.debug(f"HTTP {r.status_code} → 重试 ({attempt+1}/{retries}) sleep={sleep_s:.1f}s")
+                    time.sleep(sleep_s)
+                    continue
+            # 200 但内容是 cookie 引导壳（< 3KB 且包含 root 容器）→ cookie 鉴权失败
+            if (r.status_code == 200
+                    and len(r.text) < 3000
+                    and "id=\"root\"" in r.text):
+                global _GUBA_WARMED_UP, _COOKIE_STALE, _last_shell_warn_ts
+                # 已判定 cookie 过期：warmup 只是重新注入同一组过期硬编码 cookie，
+                # 无济于事。静默降级返回引导壳（上层 fetch_post_full 会转成
+                # fetch_error，列表页标题仍可用），不再每个请求都打日志/做 warmup。
+                if _COOKIE_STALE:
+                    return r
+                if not warmed_retry_done:
+                    # 首次引导壳：尝试一次 warmup（应对 session cookie jar 丢失的
+                    # 瞬时情况），重试一次看是否恢复
+                    logger.info(f"[guba] 详情页返回引导壳（len={len(r.text)}），尝试 cookie 预热")
+                    _GUBA_WARMED_UP = False
+                    if _warmup_guba_session():
+                        warmed_retry_done = True
+                        continue  # 用新 cookie 重试
+                else:
+                    # warmup 后仍引导壳 → 硬编码 cookie 过期，正文抓取失效
+                    _COOKIE_STALE = True
+                    now = time.time()
+                    if now - _last_shell_warn_ts > _SHELL_WARN_INTERVAL:
+                        logger.error(
+                            "[guba] cookie 预热后仍返回引导壳，判定 cookie 过期 —— "
+                            "正文抓取将降级（列表页标题仍可用）；恢复需人工更新 "
+                            "_GUBA_BOOTSTRAP_COOKIES 并重启"
+                        )
+                        _last_shell_warn_ts = now
+            return r
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                requests.exceptions.ChunkedEncodingError) as e:
+            last_exc = e
+            if attempt < retries:
+                sleep_s = backoff * (2 ** attempt)
+                logger.debug(f"网络错误 → 重试 ({attempt+1}/{retries}) sleep={sleep_s:.1f}s: {e}")
+                time.sleep(sleep_s)
+                continue
+            raise
+        except CircuitOpenError:
+            raise  # 熔断中，不重试
+    if last_exc:
+        raise last_exc
+    return None  # 不应到达
+
+
+def filter_posts(posts: list[dict], filter_type: str = "title_keyword") -> list[dict]:
+    """根据过滤规则白名单过滤帖子列表。
+
+    Args:
+        posts: 原始帖子列表
+        filter_type: 过滤类型，目前仅支持 title_keyword
+
+    Returns:
+        过滤后的帖子列表
+    """
+    # 从 DB 获取过滤关键词，失败时用预置列表
+    try:
+        rules = get_sentiment_filters(filter_type=filter_type, enabled_only=True)
+        keywords = [r["filter_key"] for r in rules]
+    except Exception:
+        keywords = _DEFAULT_FILTER_KEYWORDS
+
+    if not keywords:
+        return posts
+
+    filtered = []
+    for p in posts:
+        title = p.get("title", "")
+        if not title:
+            # 标题为空时，用内容的前30字作为标题尝试
+            content = p.get("content", "") or ""
+            if len(content) < 5:
+                continue  # 内容也太短，跳过
+            title = content[:30]
+
+        # 跳过标题含白名单关键词的帖子
+        skip = False
+        for kw in keywords:
+            if kw in title:
+                skip = True
+                logger.debug(f"过滤帖子 [keyword={kw}]: {title[:40]}")
+                break
+        if skip:
+            continue
+
+        # 跳过标题过短（<5字）的帖子
+        if len(title.strip()) < 5:
+            continue
+
+        filtered.append(p)
+
+    if len(filtered) < len(posts):
+        logger.info(f"过滤完成: {len(filtered)}/{len(posts)} 条保留")
+    return filtered
 
 def _extract_json(text: str, key: str) -> dict | None:
     """从 JavaScript 赋值语句中提取 JSON 对象（括号计数法）。
@@ -50,6 +379,7 @@ def _extract_json(text: str, key: str) -> dict | None:
 
 GUBA_LIST_URL = "https://guba.eastmoney.com/list,{code}.html"
 GUBA_POST_URL = "https://guba.eastmoney.com/news,{code},{post_id}.html"
+# 兼容旧调用点（_http_get_with_retry 当前会忽略此 dict，cookie 由 _GUBA_SESSION 维护）
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -97,8 +427,7 @@ def fetch_post_list(code: str, days: int = 7, max_posts: int = 100) -> list[dict
             url = f"https://guba.eastmoney.com/list,{code}_{page}.html"
 
         try:
-            with _no_proxy():
-                r = requests.get(url, headers=HEADERS, timeout=15)
+            r = _http_get_with_retry(url, HEADERS, timeout=15)
             r.encoding = "utf-8"
 
             if r.status_code != 200:
@@ -159,7 +488,7 @@ def fetch_post_list(code: str, days: int = 7, max_posts: int = 100) -> list[dict
             if items and _parse_timestamp(items[-1].get("post_last_time") or items[-1].get("post_publish_time")) or 0 < cutoff:
                 break
 
-        except (json.JSONDecodeError, requests.RequestException) as e:
+        except (json.JSONDecodeError, requests.RequestException, CircuitOpenError) as e:
             logger.error(f"获取股吧帖子列表失败: {code} page={page}: {e}")
             break
 
@@ -170,7 +499,7 @@ def fetch_post_list(code: str, days: int = 7, max_posts: int = 100) -> list[dict
 
 
 def fetch_post_content(code: str, post_id: str) -> str | None:
-    """获取单条帖子的正文内容。
+    """获取单条帖子的正文内容（向后兼容的薄包装）。
 
     Args:
         code: 6位股票代码
@@ -179,29 +508,78 @@ def fetch_post_content(code: str, post_id: str) -> str | None:
     Returns:
         帖子正文文本，失败返回 None
     """
+    result = fetch_post_full(code, post_id)
+    if not result:
+        return None
+    return result.get("content")
+
+
+def fetch_post_full(code: str, post_id: str) -> dict | None:
+    """获取单条帖子的完整数据：真实标题 + 正文 + 抓取状态。
+
+    用于审计和数据完整性校验。比 fetch_post_content 多返回 post_article JSON
+    中的 post_title 字段（与列表页 article_list 的 post_title 经常不一致）。
+
+    2026-06 之后 guba 详情页改造：
+    - 未携带 anti-bot cookies 时只返回 2.8KB 引导壳（由 _GUBA_SESSION + bootstrap 处理）
+    - post_id 形如 1xxxxxxxxx 的"转发/转载"帖，post_article.post_title 是 "转发"，
+      真实标题在 source_post_title 字段。本函数对这种帖会自动取源帖标题作为 actual_title
+
+    Args:
+        code: 6位股票代码
+        post_id: 帖子ID
+
+    Returns:
+        {
+          "actual_title": str | None,   # 帖子页面的真实标题（转发帖取源帖标题）
+          "content": str | None,        # 帖子正文
+          "fetch_error": str | None,    # 抓取失败原因
+        }
+        整个请求失败时返回 None
+    """
     code = str(code).strip().zfill(6)
     url = GUBA_POST_URL.format(code=code, post_id=post_id)
 
     try:
-        with _no_proxy():
-            r = requests.get(url, headers=HEADERS, timeout=10)
+        r = _http_get_with_retry(url, HEADERS, timeout=10)
+        # guba 服务端不带 charset；强制 UTF-8（guba 实际就是 utf-8），
+        # 否则 requests 会按 ISO-8859-1 兜底，导致中文乱码。
         r.encoding = "utf-8"
 
         if r.status_code != 200:
-            return None
+            return {
+                "actual_title": None,
+                "content": None,
+                "fetch_error": f"HTTP {r.status_code}",
+            }
 
-        # 提取帖子正文
+        # 提取帖子页面的 JSON
         data = _extract_json(r.text, "post_article")
         if data:
+            actual_title = (data.get("post_title") or "").strip() or None
             content = data.get("post_content", "")
+            # 转发/转载：post_title 是"转发"占位，真实标题在 source_post_title
+            # 仅在源帖存在且当前帖 post_type=0/20（普通用户帖）时替换
+            source_title = (data.get("source_post_title") or "").strip()
+            if (actual_title in ("转发", "转载", "轉發")
+                    and source_title
+                    and data.get("source_post_id")
+                    and str(data.get("source_post_id")) != str(data.get("post_id"))):
+                actual_title = source_title
+
             if content:
-                # 去除 HTML 标签
                 content = re.sub(r"<[^>]+>", "", content)
                 content = re.sub(r"&nbsp;", " ", content)
                 content = re.sub(r"\s+", " ", content).strip()
-                return content
+            if not content:
+                content = None
+            return {
+                "actual_title": actual_title,
+                "content": content,
+                "fetch_error": None,
+            }
 
-        # 回退：尝试直接从 HTML 提取
+        # 回退：直接从 HTML 提取（无标题信息）
         match = re.search(
             r'<div[^>]*class="[^"]*stockcodec[^"]*"[^>]*>(.*?)</div>',
             r.text, re.DOTALL
@@ -210,35 +588,284 @@ def fetch_post_content(code: str, post_id: str) -> str | None:
             content = match.group(1)
             content = re.sub(r"<[^>]+>", "", content)
             content = re.sub(r"\s+", " ", content).strip()
-            return content
+            return {
+                "actual_title": None,
+                "content": content,
+                "fetch_error": "no_post_article_json",
+            }
+
+        return {
+            "actual_title": None,
+            "content": None,
+            "fetch_error": "no_content_in_html",
+        }
     except (requests.RequestException, json.JSONDecodeError) as e:
         logger.warning(f"获取帖子内容失败 {post_id}: {e}")
+        return {
+            "actual_title": None,
+            "content": None,
+            "fetch_error": str(e)[:200],
+        }
 
-    return None
+
+def audit_post_title(code: str, post_id: str, url: str,
+                     stored_title: str, forum_type: str = "eastmoney") -> dict:
+    """审计单条帖子的标题真实性，并把结果写回 DB。
+
+    Args:
+        code: 6位股票代码
+        post_id: 帖子ID
+        url: 帖子 URL（未使用，预留）
+        stored_title: DB 中存储的标题
+        forum_type: 论坛类型
+
+    Returns:
+        {
+          "post_id": str, "match": bool | None,
+          "actual_title": str | None, "stored_title": str,
+          "fetch_error": str | None, "audit_status": str,
+        }
+    """
+    from backend.core.database import update_post_audit
+
+    full = fetch_post_full(code, post_id)
+    if not full:
+        return {
+            "post_id": post_id, "match": None,
+            "actual_title": None, "stored_title": stored_title,
+            "fetch_error": "request_failed",
+            "audit_status": "pending",
+        }
+
+    actual = (full.get("actual_title") or "").strip()
+    fetch_error = full.get("fetch_error")
+
+    # 抓取失败但没有 actual_title → pending，等下次再试
+    if fetch_error and not actual:
+        audit_status = "pending"
+        match = None
+    elif not actual:
+        # 抓到了页面但没拿到标题（极少数，可能是反爬）
+        audit_status = "pending"
+        match = None
+    else:
+        # guba 详情页 URL 已经失效：返回的可能是"帖子不存在"页面或完全不同的帖子
+        # 这种情况不算 title mismatch（用户看到的是列表页的标题，列表页正常），
+        # 应该标 pending 让用户手动 accept 或下次重试
+        if actual in ("很抱歉，您访问的帖子不存在", "很抱歉,您访问的帖子不存在",
+                      "帖子不存在", "该帖已被删除"):
+            audit_status = "pending"
+            match = None
+        else:
+            # 成功拿到实际标题，对比
+            match = _normalize(stored_title) == _normalize(actual)
+            audit_status = "verified" if match else "mismatch"
+
+    # 找到 DB id 并写回
+    from backend.core.database import get_connection
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id FROM forum_posts WHERE stock_code=? AND forum_type=? AND url LIKE ?",
+            (code, forum_type, f"%,{post_id}.html"),
+        )
+        row = cur.fetchone()
+        if row:
+            update_post_audit(
+                row["id"],
+                actual_title=actual or None,
+                title_match=match,
+                audit_status=audit_status,
+                audit_note=fetch_error,
+            )
+
+    return {
+        "post_id": post_id,
+        "match": match,
+        "actual_title": actual or None,
+        "stored_title": stored_title,
+        "fetch_error": fetch_error,
+        "audit_status": audit_status,
+    }
+
+
+def _normalize(title: str) -> str:
+    """标题归一化：去空白 + 去常见装饰符号。"""
+    if not title:
+        return ""
+    t = re.sub(r"\s+", "", title)
+    # 去除东财常见的方括号装饰（但保留内部内容）
+    return t.strip()
+
+
+def audit_posts(posts: list[dict], forum_type: str = "eastmoney",
+                sleep_seconds: float = 0.3,
+                max_workers: int = None) -> dict:
+    """批量审计帖子标题真实性。
+
+    v2 2026-06-04：网络韧性调优 - 并发执行。
+    - 用 ThreadPoolExecutor 并行抓取，默认 4 workers
+    - 熔断器打开时短路（CircuitOpenError）→ 剩余帖子不再尝试
+    - 已审计过（audit_status='verified'/'manual_accepted'/'broken'）的帖子跳过
+
+    Args:
+        posts: 帖子列表，每条需含 {post_id, title, code, url}
+        forum_type: 论坛类型
+        sleep_seconds: 请求间隔（仅作日志提示，并发场景不再 sleep）
+        max_workers: 并发线程数（默认 GUBA_AUDIT_MAX_WORKERS）
+
+    Returns:
+        {
+          "audited": N, "matched": N, "mismatched": N,
+          "fetch_errors": N, "skipped": N,
+          "mismatches": [...],   # 详细不一致列表
+        }
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from backend.core.database import get_connection
+    from backend.config import GUBA_AUDIT_MAX_WORKERS
+
+    if max_workers is None:
+        max_workers = GUBA_AUDIT_MAX_WORKERS
+
+    summary = {
+        "audited": 0, "matched": 0, "mismatched": 0,
+        "fetch_errors": 0, "skipped": 0, "mismatches": [],
+    }
+
+    # 找出需要审计的帖子（跳过已 verified/manual_accepted/broken 的）
+    pending_posts = []
+    for p in posts:
+        post_id = str(p.get("post_id", ""))
+        if not post_id:
+            summary["skipped"] += 1
+            continue
+        # 检查 DB 当前审计状态
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """SELECT audit_status FROM forum_posts
+                   WHERE stock_code=? AND forum_type=? AND url LIKE ?""",
+                (p.get("code", ""), forum_type, f"%,{post_id}.html"),
+            )
+            row = cur.fetchone()
+        status = row["audit_status"] if row else None
+        if status in ("verified", "manual_accepted", "broken"):
+            summary["skipped"] += 1
+            continue
+        pending_posts.append(p)
+
+    if not pending_posts:
+        return summary
+
+    # 熔断器预先检测：避免给熔断中的 guba 提交任务
+    if _GUBA_CIRCUIT.state["state"] == "open":
+        logger.warning("guba 熔断中，跳过整批审计")
+        summary["skipped"] += len(pending_posts)
+        summary["circuit_open"] = True
+        return summary
+
+    def _audit_one(p):
+        return audit_post_title(
+            p.get("code", ""),
+            str(p.get("post_id", "")),
+            p.get("url", ""),
+            p.get("title", ""),
+            forum_type,
+        )
+
+    circuit_broken = False
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="audit") as ex:
+        future_to_post = {
+            ex.submit(_audit_one, p): p for p in pending_posts
+        }
+        for future in as_completed(future_to_post):
+            p = future_to_post[future]
+            post_id = str(p.get("post_id", ""))
+            stored = p.get("title", "")
+            try:
+                result = future.result()
+            except CircuitOpenError as e:
+                # 熔断开了：把剩余全部标记为跳过
+                logger.warning(f"guba 熔断触发，跳过剩余审计: {e}")
+                remaining = sum(1 for f in future_to_post if not f.done())
+                summary["skipped"] += remaining
+                circuit_broken = True
+                # 取消未启动的 future
+                for f in future_to_post:
+                    f.cancel()
+                break
+            except Exception as e:
+                logger.error(f"审计异常: {post_id}: {e}", exc_info=True)
+                summary["fetch_errors"] += 1
+                continue
+
+            summary["audited"] += 1
+            if result.get("fetch_error"):
+                summary["fetch_errors"] += 1
+            if result.get("match") is True:
+                summary["matched"] += 1
+            elif result.get("match") is False:
+                summary["mismatched"] += 1
+                summary["mismatches"].append({
+                    "post_id": post_id,
+                    "stored": stored,
+                    "actual": result.get("actual_title"),
+                    "url": p.get("url", ""),
+                })
+
+    if circuit_broken:
+        summary["circuit_open"] = True
+
+    logger.info(
+        f"标题审计完成: {summary['audited']} 审计, "
+        f"{summary['matched']} 一致, {summary['mismatched']} 不一致, "
+        f"{summary['fetch_errors']} 抓取失败, {summary['skipped']} 跳过"
+        f" (workers={max_workers})"
+    )
+    return summary
 
 
 def fetch_forum_posts(code: str, forum_type: str = "eastmoney",
-                      days: int = 7, fetch_content: bool = True) -> list[dict]:
+                      days: int = 7, fetch_content: bool = True,
+                      audit: bool = True) -> tuple[list[dict], dict | None]:
     """获取股票论坛帖子（爬取 + 缓存到 DB）。
+
+    v2 2026-06-04：网络韧性调优
+    - 新增 audit 参数：prefetch 场景可关掉以节省网络
+    - 返回类型改为 tuple：(posts, audit_summary)
+    - audit_summary 仅在 audit=True 时返回，prefetch (audit=False) 时为 None
 
     Args:
         code: 6位股票代码
         forum_type: 论坛类型，目前仅支持 eastmoney
         days: 取最近多少天的帖子（默认7天）
         fetch_content: 是否获取帖子正文
+        audit: 是否在抓取后跑标题真实性审计
 
     Returns:
-        帖子列表，每条含 title, content, author, post_time 等字段
+        (posts, audit_summary) - 帖子列表 + 审计摘要
     """
     if forum_type != "eastmoney":
         logger.warning(f"暂不支持的论坛类型: {forum_type}")
-        return []
+        return [], None
 
     code = str(code).strip().zfill(6)
-    posts = fetch_post_list(code, days=days, max_posts=100)
+    try:
+        posts = fetch_post_list(code, days=days, max_posts=100)
+    except CircuitOpenError as e:
+        # 熔断中：直接返回 DB 缓存（降级）
+        logger.warning(f"抓取帖子列表被熔断: {code}: {e}")
+        cached = get_recent_posts(code, forum_type, limit=100)
+        return cached, {"audited": 0, "matched": 0, "mismatched": 0,
+                        "fetch_errors": 0, "skipped": 0,
+                        "circuit_open": True}
+
+    # 过滤无意义帖子
+    posts = filter_posts(posts)
 
     if not posts:
-        return []
+        return [], None
 
     # 缓存帖子到 DB，去重
     new_posts = []
@@ -274,12 +901,20 @@ def fetch_forum_posts(code: str, forum_type: str = "eastmoney",
             posts_need_content = [row["url"] for row in cur.fetchall()]
 
         for url in posts_need_content:
+            # 熔断检测：遇到熔断就跳出循环
+            if _GUBA_CIRCUIT.state["state"] == "open":
+                logger.warning(f"抓取帖子正文时熔断打开: {code} 剩余 {len(posts_need_content)} 条未抓")
+                break
             # 从 URL 提取 post_id: .../news,{code},{post_id}.html
             pid_match = re.search(r"/news,\d+,(\d+)\.html", url)
             if not pid_match:
                 continue
             post_id = pid_match.group(1)
-            content = fetch_post_content(code, post_id)
+            try:
+                content = fetch_post_content(code, post_id)
+            except CircuitOpenError:
+                logger.warning(f"抓取正文被熔断: {code} {post_id}")
+                break
             if content:
                 try:
                     with get_connection() as conn:
@@ -291,26 +926,49 @@ def fetch_forum_posts(code: str, forum_type: str = "eastmoney",
                     pass
             time.sleep(0.3)  # 避免请求过快
 
-    # 返回所有帖子
+    # 返回所有帖子（带审计字段，过滤掉 broken 但保留 NULL）
     result = []
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            """SELECT title, content, author, post_time, url FROM forum_posts
+            """SELECT id, title, actual_title, title_match, audit_status,
+                      title_verified_at, content, author, post_time, url
+               FROM forum_posts
                WHERE stock_code=? AND forum_type=?
+                 AND (audit_status IS NULL OR audit_status != 'broken')
                ORDER BY post_time DESC LIMIT 100""",
             (code, forum_type),
         )
         for row in cur.fetchall():
             result.append({
+                "post_id": row["id"],
                 "title": row["title"],
+                "actual_title": row["actual_title"],
+                "title_match": row["title_match"],
+                "audit_status": row["audit_status"],
+                "title_verified_at": row["title_verified_at"],
                 "content": row["content"] or "",
                 "author": row["author"],
                 "post_time": row["post_time"],
                 "url": row["url"],
             })
 
-    return result
+    # 标题真实性审计（默认开启，prefetch 场景可关掉）
+    audit_summary = None
+    if audit and result:
+        try:
+            audit_summary = audit_posts(
+                [{"post_id": p["post_id"], "title": p["title"],
+                  "code": code, "url": p["url"]}
+                 for p in result if p.get("post_id")],
+                forum_type=forum_type,
+            )
+        except CircuitOpenError:
+            audit_summary = {"audited": 0, "matched": 0, "mismatched": 0,
+                             "fetch_errors": 0, "skipped": 0,
+                             "circuit_open": True}
+
+    return result, audit_summary
 
 
 def test_post_attribution(code: str) -> dict:
@@ -330,8 +988,7 @@ def test_post_attribution(code: str) -> dict:
     result = {"filtered": len(filtered_posts), "total_raw": 0, "mismatch": 0, "details": []}
 
     try:
-        with _no_proxy():
-            r = requests.get(GUBA_LIST_URL.format(code=code), headers=HEADERS, timeout=15)
+        r = _http_get_with_retry(GUBA_LIST_URL.format(code=code), HEADERS, timeout=15)
         r.encoding = "utf-8"
         data = _extract_json(r.text, "article_list")
         if data:
@@ -359,18 +1016,30 @@ def test_post_attribution(code: str) -> dict:
 
 def get_recent_posts(code: str, forum_type: str = "eastmoney",
                      limit: int = 20) -> list[dict]:
-    """从 DB 缓存中获取最近的帖子（不重新爬取）。"""
+    """从 DB 缓存中获取最近的帖子（不重新爬取）。
+
+    v1 2026-06-04：附带审计字段（actual_title, title_match, audit_status, post_id）。
+    审计字段让前端可以在帖子列表展示审计 badge 和 diff 面板。
+    """
     code = str(code).strip().zfill(6)
     with get_connection() as conn:
         cur = conn.cursor()
         cur.execute(
-            """SELECT title, content, author, post_time, url FROM forum_posts
+            """SELECT id, title, actual_title, title_match, audit_status,
+                      title_verified_at, content, author, post_time, url
+               FROM forum_posts
                WHERE stock_code=? AND forum_type=?
+                 AND (audit_status IS NULL OR audit_status != 'broken')
                ORDER BY post_time DESC LIMIT ?""",
             (code, forum_type, limit),
         )
         return [{
+            "post_id": row["id"],
             "title": row["title"],
+            "actual_title": row["actual_title"],
+            "title_match": row["title_match"],
+            "audit_status": row["audit_status"],
+            "title_verified_at": row["title_verified_at"],
             "content": row["content"] or "",
             "author": row["author"],
             "post_time": row["post_time"],

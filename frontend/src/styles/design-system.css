@@ -1,0 +1,138 @@
+/*
+ * Modern Design System
+ * Inspired by Stripe · Linear · Vercel aesthetic — refined, restrained, premium.
+ *
+ * 设计哲学：
+ *  - 极淡冷灰底（zinc-50），非纯白；卡片白底用于信息层叠
+ *  - 极细边框 + 极淡环境光阴影（避免重投影）
+ *  - 主色克制：indigo-600 单色系，所有强调色用同一族
+ *  - 字号层次清晰，行高宽松；视觉权重靠 color/weight 而非 size
+ *  - 圆角 6/8/12/16 阶梯（统一节奏）
+ *  - 涨跌色用 A 股惯例（红涨绿跌），但用 rose-600 / emerald-600 柔化
+ *  - 所有交互过渡 300ms ease-out，丝滑不突兀
+ */
+
+:root {
+  /* ── 颜色：背景（zinc 阶，禁用纯白） ── */
+  --color-bg-page: #f8fafc;            /* 页面底色（zinc-50，冷调极淡灰） */
+  --color-bg-elevated: #ffffff;        /* 卡片/容器背景（白，作为视觉锚点） */
+  --color-bg-muted: #f4f4f5;           /* 次级背景 hover/输入框（zinc-100） */
+  --color-bg-subtle: #fafafa;          /* 最浅底（zinc-50 的偏暖变体） */
+  --color-bg-glass: rgba(255, 255, 255, 0.72);   /* 毛玻璃底，侧边栏/装饰卡用 */
+
+  /* ── 颜色：边框 ── */
+  --color-border: #e4e4e7;             /* 默认边框（zinc-200，极细） */
+  --color-border-strong: #d4d4d8;      /* 加深（zinc-300，hover/focus） */
+  --color-divider: #f4f4f5;            /* 分隔线（zinc-100） */
+
+  /* ── 颜色：文本（zinc 阶） ── */
+  --color-text-primary: #18181b;       /* 主文本（zinc-900，深而不死） */
+  --color-text-secondary: #52525b;     /* 次级文本（zinc-600） */
+  --color-text-tertiary: #71717a;      /* 辅助文本（zinc-500） */
+  --color-text-disabled: #a1a1aa;      /* 禁用（zinc-400） */
+  --color-text-inverse: #ffffff;       /* 反色文本 */
+
+  /* ── 颜色：品牌主色（indigo 阶，单色系） ── */
+  --color-accent: #4f46e5;             /* 主色（indigo-600，Stripe/Linear 风） */
+  --color-accent-hover: #4338ca;       /* hover（indigo-700） */
+  --color-accent-soft: #eef2ff;        /* 极淡底（indigo-50） */
+  --color-accent-text: #4338ca;        /* 强调文字（indigo-700） */
+  --color-accent-deep: #1e1b4b;        /* 深色 hover/激活文字（indigo-950） */
+
+  /* ── 颜色：A 股涨跌（rose/emerald 柔化版） ── */
+  --color-up: #e11d48;                 /* 红涨（rose-600，比纯红柔和） */
+  --color-up-soft: #fff1f2;            /* 红涨软底（rose-50） */
+  --color-down: #059669;               /* 绿跌（emerald-600，比纯绿柔和） */
+  --color-down-soft: #ecfdf5;          /* 绿跌软底（emerald-50） */
+
+  /* ── 颜色：语义 ── */
+  --color-warning: #d97706;
+  --color-warning-soft: #fffbeb;
+  --color-danger: #dc2626;
+  --color-danger-soft: #fef2f2;
+  --color-success: #059669;
+  --color-success-soft: #ecfdf5;
+  --color-info: #0284c7;
+  --color-info-soft: #f0f9ff;
+
+  /* ── 间距（4 的倍数） ── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ── 圆角（4 阶梯） ── */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+  --radius-full: 9999px;
+
+  /* ── 阴影（极淡环境光，indigo glow 单例外） ── */
+  --shadow-xs: 0 1px 2px rgba(15, 15, 15, 0.04);
+  --shadow-sm: 0 1px 3px rgba(15, 15, 15, 0.05),
+               0 1px 2px rgba(15, 15, 15, 0.03);
+  --shadow-md: 0 2px 6px rgba(15, 15, 15, 0.04),
+               0 4px 12px rgba(15, 15, 15, 0.04);
+  --shadow-lg: 0 4px 12px rgba(15, 15, 15, 0.06),
+               0 8px 24px rgba(15, 15, 15, 0.06);
+  --shadow-xl: 0 8px 24px rgba(15, 15, 15, 0.08),
+               0 16px 48px rgba(15, 15, 15, 0.08);
+  --shadow-focus: 0 0 0 3px rgba(79, 70, 229, 0.15);   /* indigo focus 环 */
+  --shadow-glow: 0 0 0 1px rgba(79, 70, 229, 0.08),    /* indigo 微光晕，accent 卡片 hover */
+                  0 8px 24px -8px rgba(79, 70, 229, 0.25);
+  --shadow-sidebar: 1px 0 0 0 #e4e4e7,                 /* 侧边栏右沿极淡分层 */
+                    8px 0 24px -12px rgba(15, 15, 15, 0.04);
+
+  /* ── 字体 ── */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+               'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+               'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-mono: 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 15px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 20px;
+  --text-3xl: 24px;
+  --text-4xl: 30px;
+  --text-5xl: 36px;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.7;
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* ── 布局 ── */
+  --layout-max-width: 1280px;
+  --layout-sidebar-width: 232px;       /* 加宽 12px 容纳激活条 */
+  --layout-header-height: 56px;
+  --layout-content-padding: 24px;
+
+  /* ── 过渡（统一 300ms ease-out） ── */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --duration-fast: 150ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+  --duration-page: 300ms;              /* 页面级 hover 过渡 */
+
+  /* ── 层级（z-index） ── */
+  --z-dropdown: 1000;
+  --z-sticky: 1100;
+  --z-modal: 2000;
+  --z-toast: 3000;
+}

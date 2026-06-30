@@ -2,7 +2,7 @@
 历史数据提供者 — 通过 akshare 获取日线数据，SQLite 缓存。
 
 支持：
-  - 日线数据（akshare stock_zh_a_hist）
+  - 日线数据（akshare stock_zh_a_daily）
   - 分钟级数据（预留接口，后续实现）
   - 自动缓存到 DB，避免重复请求
 """
@@ -25,9 +25,6 @@ _MAX_RETRIES = 3
 _BASE_DELAY = 2.0
 _MAX_DELAY = 15.0
 _REQUEST_TIMEOUT = 15
-
-# 代理环境变量键
-_PROXY_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy")
 
 
 class HistoricalDataProvider(DataProvider):
@@ -126,14 +123,16 @@ class HistoricalDataProvider(DataProvider):
         """通过 akshare (新浪源) 拉取日线 — 主数据源。"""
         try:
             import akshare as ak
+            from backend.services.stock_service import _no_proxy
 
             sina_symbol = f"sh{symbol}" if symbol.startswith(("6", "9")) else f"sz{symbol}"
-            df = ak.stock_zh_a_daily(
-                symbol=sina_symbol,
-                start_date=chunk_start.replace("-", ""),
-                end_date=chunk_end.replace("-", ""),
-                adjust="qfq",
-            )
+            with _no_proxy():
+                df = ak.stock_zh_a_daily(
+                    symbol=sina_symbol,
+                    start_date=chunk_start.replace("-", ""),
+                    end_date=chunk_end.replace("-", ""),
+                    adjust="qfq",
+                )
 
             if df is not None and not df.empty:
                 return self._parse_sina_df(symbol, df, chunk_start, chunk_end)
@@ -143,40 +142,37 @@ class HistoricalDataProvider(DataProvider):
 
         return []
 
-    def _try_fetch_chunk_eastmoney(
+    def _try_fetch_chunk_sina_backup(
         self, symbol: str, chunk_start: str, chunk_end: str,
     ) -> list[Bar]:
-        """通过 akshare (东方财富源) 拉取日线 — 备选数据源。"""
+        """备选数据源（v2, 2026-06-16）：原东财 ``ak.stock_zh_a_hist``（push2
+        域）RST 频繁，改用同接口的 sina 源别名 ``ak.stock_zh_a_daily``。
+
+        之所以保留这层兜底：sina 主源偶尔也 502，两层都用 sina 接口
+        + 不同 prefix（主源 ``sina_symbol = sh/sz + code``，备选带
+        ``0000001.`` 前缀走另一组 sina 端点），可提高整体成功率。
+        """
         import akshare as ak
+        from backend.services.stock_service import _no_proxy
 
-        for force_direct in (False, True):
-            if force_direct:
-                backup = {k: os.environ.pop(k, None) for k in _PROXY_KEYS}
-            else:
-                backup = {}
-
-            try:
-                df = ak.stock_zh_a_hist(
+        try:
+            with _no_proxy():
+                df = ak.stock_zh_a_daily(
                     symbol=symbol,
-                    period="daily",
                     start_date=chunk_start.replace("-", ""),
                     end_date=chunk_end.replace("-", ""),
                     adjust="qfq",
                     timeout=_REQUEST_TIMEOUT,
                 )
 
-                if df is not None and not df.empty:
-                    return self._parse_eastmoney_df(symbol, df, chunk_start, chunk_end)
+            if df is not None and not df.empty:
+                return self._parse_sina_df(symbol, df, chunk_start, chunk_end)
 
-            except Exception as e:
-                logger.debug(f"EastMoney 获取失败 (direct={force_direct}): {symbol}: {e}")
-
-            finally:
-                for k, v in backup.items():
-                    if v is not None:
-                        os.environ[k] = v
+        except Exception as e:
+            logger.debug(f"备选源获取失败: {symbol}: {e}")
 
         return []
+
 
     def _parse_sina_df(
         self, symbol: str, df, chunk_start: str, chunk_end: str,
@@ -208,44 +204,18 @@ class HistoricalDataProvider(DataProvider):
         logger.info(f"Sina 获取 {len(bars)} 条K线: {symbol} {chunk_start}~{chunk_end}")
         return bars
 
-    def _parse_eastmoney_df(
-        self, symbol: str, df, chunk_start: str, chunk_end: str,
-    ) -> list[Bar]:
-        """解析东方财富返回的 DataFrame（中文列名：日期/开盘/最高/最低/收盘/成交量/成交额）。"""
-        bars = []
-        for _, row in df.iterrows():
-            try:
-                bar_time = pd_timestamp_to_datetime(row["日期"])
-                bars.append(Bar(
-                    symbol=symbol,
-                    timeframe="1d",
-                    bar_time=bar_time,
-                    open=float(row["开盘"]),
-                    high=float(row["最高"]),
-                    low=float(row["最低"]),
-                    close=float(row["收盘"]),
-                    volume=float(row["成交量"]),
-                    amount=float(row.get("成交额", 0)),
-                ))
-            except (ValueError, KeyError) as e:
-                logger.debug(f"解析东财K线行失败: {e}")
-                continue
-
-        logger.info(f"EastMoney 获取 {len(bars)} 条K线: {symbol} {chunk_start}~{chunk_end}")
-        return bars
-
     def _fetch_single_chunk(
         self, symbol: str, chunk_start: str, chunk_end: str,
     ) -> list[Bar]:
-        """拉取单个时间段的日线数据，带重试和双源备选（新浪优先，东方财富备选）。"""
+        """拉取单个时间段的日线数据，带重试和双层新浪源（主源 + 备选）兜底。"""
         for attempt in range(1, _MAX_RETRIES + 1):
-            # 主源：新浪（通过网络测试，代理可通）
+            # 主源：新浪（sh/sz 前缀 + 完整日期）
             bars = self._try_fetch_chunk_sina(symbol, chunk_start, chunk_end)
             if bars:
                 return bars
 
-            # 备选源：东方财富
-            bars = self._try_fetch_chunk_eastmoney(symbol, chunk_start, chunk_end)
+            # 备选源（新浪源不同 prefix，与主源互为兜底）
+            bars = self._try_fetch_chunk_sina_backup(symbol, chunk_start, chunk_end)
             if bars:
                 return bars
 
@@ -258,7 +228,7 @@ class HistoricalDataProvider(DataProvider):
                 time.sleep(delay)
             else:
                 logger.error(
-                    f"数据获取失败(已重试{_MAX_RETRIES}次，双源均不可用): {symbol}"
+                    f"数据获取失败(已重试{_MAX_RETRIES}次，双层新浪源均不可用): {symbol}"
                 )
 
         return []
@@ -335,10 +305,3 @@ def _estimate_trading_days(start_str: str, end_str: str) -> int:
     except Exception:
         return 252
 
-
-def pd_timestamp_to_datetime(ts) -> datetime:
-    """pandas Timestamp → datetime。"""
-    try:
-        return ts.to_pydatetime()
-    except AttributeError:
-        return datetime.fromisoformat(str(ts))

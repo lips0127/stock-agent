@@ -112,3 +112,12 @@ class BaseStrategy(ABC):
         if self.context is None:
             return []
         return self.context.get_history(symbol, timeframe, start, end)
+
+    def get_sentiment_indicator(self, symbol: str, days: int = 1) -> dict | None:
+        """读取舆情时序因子（v3, 2026-06-06）。
+
+        委托给 context.get_sentiment_indicator。返回 None 表示无数据。
+        """
+        if self.context is None:
+            return None
+        return self.context.get_sentiment_indicator(symbol, days)
