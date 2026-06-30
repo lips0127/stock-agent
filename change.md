@@ -36,6 +36,18 @@
 
 ---
 
+### Step 3 分层器（feature/tenbag-scanner）
+
+`backend/services/tenbag_pool_service.py` `classify_pool(trend_signals, anomaly_signals, industry_signals=None) -> {tier, reasons}` 纯函数，确定性规则分层：
+- 一级：≥3 正向异动 + 无风险 + 趋势确认（stage2/advancing）
+- 二级：趋势确认 + 1-2 萌芽异动；或 ≥3 异动但横盘（业绩待市场验证）
+- 三级：概念/趋势强（stage2 或 新高≥0.4 或 量比≥1.5）+ ≤1 异动
+- 排除：趋势破位 + 无异动；或 无异动且趋势未确认
+
+industry_signals 为 M3 预留（高景气加成仅影响 reasons）。TDD：`tests/test_tenbag_pool.py`（9 用例）。E2E 实测 600519（downtrend + 无异动 → 排除池）符合预期。54 测试全绿。
+
+---
+
 ## 2026-06-28
 
 ### VIX 算法 v6 / v6.1 — 多 ETF 合成生效 + 评审采纳调整

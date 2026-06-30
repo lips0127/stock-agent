@@ -3665,6 +3665,10 @@ regime 判定（主锚点日线 MA60，回退月线 MA12）：
 
 akshare 抓取（EM 接口，2026-07-01 demo 实测）：`fetch_balance_sheet_em` / `fetch_cash_flow_em` / `fetch_financials_em`。字段归一化映射：`INVENTORY`→存货、`CONTRACT_LIAB`→合同负债、`CIP`→在建工程、`ACCOUNTS_RECE`→应收账款、`FIXED_ASSET`→固定资产、`NETCASH_OPERATE`→经营现金流净额。
 
+### 19.5.1 分层器（`backend/services/tenbag_pool_service.py`）
+
+`classify_pool(trend_signals, anomaly_signals, industry_signals=None) -> {tier, reasons}` 纯函数，确定性规则分层：一级（≥3 正向异动+无风险+趋势确认）、二级（趋势确认+1-2 萌芽异动，或 ≥3 异动+横盘）、三级（概念强+财务弱）、排除（破位+无异动，或全无信号）。industry_signals 为 M3 预留（高景气加成）。
+
 ### 19.6 数据拉取接口「demo 实测先行」闸门
 
 每个新建数据/PDF/LLM 拉取接口，集成前必须先写 `scripts/demo_tenbag_*.py` 实测交用户 review。已通过：腾讯日 K、EM 资产负债表、EM 现金流。待测：巨潮资讯 cninfo 年报 PDF、MiniMax M3 结构化提取（Step 6）。
@@ -3680,7 +3684,7 @@ EM 财报接口逐期抓取，单只 2-3 分钟，全市场不可行。MVP：候
 | 0 | 分支 + 设计书 + task_kinds + DB schema TDD | ✅ |
 | 1 | 模块二趋势分析器 TDD + demo | ✅ |
 | 2 | 异动定量信号 TDD + demo | ✅ |
-| 3 | 分层器 TDD | 待 |
+| 3 | 分层器 TDD | ✅ |
 | 4 | API + 异步任务 + 调度 | 待 |
 | 5 | 前端页面 | 待 |
 | 6 | M1 PDF 解析器（demo 实测 cninfo+MiniMax） | 待 |
