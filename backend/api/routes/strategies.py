@@ -5,6 +5,7 @@ from flask import Blueprint, jsonify
 
 # 导入策略模块以触发 @register 装饰器
 import backend.strategy.examples.ma_cross  # noqa: F401
+import backend.strategy.examples.sentiment_contrarian  # noqa: F401
 
 from backend.strategy.registry import list_strategies, get as get_strategy_cls
 from backend.api.middleware import login_required

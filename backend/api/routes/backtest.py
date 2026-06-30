@@ -1,4 +1,4 @@
-"""回测 API — 运行回测、查看历史结果。"""
+"""回测 API — 运行回测、查看历史结果（v2, 2026-06-10 — TaskRunner 重构）。"""
 
 import json
 import uuid
@@ -10,6 +10,7 @@ from flask import Blueprint, request, jsonify
 
 from backend.core.database import get_connection
 from backend.api.middleware import login_required
+from backend.core.task_runner import TaskRunner
 from backend.strategy.registry import get as get_strategy_cls
 from backend.backtest.engine import BacktestEngine
 
@@ -21,7 +22,7 @@ backtest_bp = Blueprint("backtest", __name__)
 @backtest_bp.route("/api/backtest/run", methods=["POST"])
 @login_required
 def run_backtest():
-    """运行回测（异步），返回 run_id 供轮询。"""
+    """运行回测（异步），返回 run_id（兼容）和 task_run_id（TaskRunner）供轮询。"""
     body = request.get_json(silent=True) or {}
     strategy_name = body.get("strategy_name")
     symbols = body.get("symbols", [])
@@ -43,6 +44,7 @@ def run_backtest():
         return jsonify({"error": f"策略 '{strategy_name}' 未注册"}), 404
 
     run_id = str(uuid.uuid4())[:8]
+    task_id = uuid.uuid4().hex
     params_json = json.dumps(strategy_params, ensure_ascii=False)
 
     # 先在 DB 中创建一条 running 状态的记录
@@ -56,86 +58,111 @@ def run_backtest():
         )
 
     def _run():
-        try:
-            engine = BacktestEngine(
-                strategy_class=strategy_cls,
-                symbols=symbols,
-                start=start,
-                end=end,
-                initial_capital=initial_capital,
-                strategy_params=strategy_params,
-                commission_rate=commission_rate,
-                slippage=slippage,
-                timeframe=timeframe,
-            )
-            report = engine.run()
+        with TaskRunner(
+            kind="backtest",
+            title=f"策略回测 ({strategy_name})",
+            payload={
+                "run_id": run_id, "strategy_name": strategy_name,
+                "symbols": symbols, "start": start, "end": end,
+            },
+            task_id=task_id,
+        ) as t:
+            try:
+                t.set_total(len(symbols) or 1)
+                engine = BacktestEngine(
+                    strategy_class=strategy_cls,
+                    symbols=symbols,
+                    start=start,
+                    end=end,
+                    initial_capital=initial_capital,
+                    strategy_params=strategy_params,
+                    commission_rate=commission_rate,
+                    slippage=slippage,
+                    timeframe=timeframe,
+                )
+                t.set_current("执行回测")
+                report = engine.run()
 
-            if not report or "error" in report:
-                error_msg = report.get("error", "回测数据为空") if report else "回测数据为空"
+                if not report or "error" in report:
+                    error_msg = report.get("error", "回测数据为空") if report else "回测数据为空"
+                    with get_connection() as conn:
+                        conn.execute(
+                            "UPDATE backtest_runs SET status='failed', error_message=? WHERE id=?",
+                            (error_msg, run_id),
+                        )
+                    t.fail(error_msg)
+                    return
+
+                # 更新 backtest_runs
                 with get_connection() as conn:
                     conn.execute(
-                        "UPDATE backtest_runs SET status='failed', error_message=? WHERE id=?",
-                        (error_msg, run_id),
-                    )
-                return
-
-            # 更新 backtest_runs
-            with get_connection() as conn:
-                conn.execute(
-                    """UPDATE backtest_runs SET
-                       status='completed',
-                       final_value=?,
-                       total_return=?,
-                       annual_return=?,
-                       sharpe_ratio=?,
-                       max_drawdown=?,
-                       win_rate=?,
-                       total_trades=?
-                       WHERE id=?""",
-                    (
-                        report.get("final_value"),
-                        report.get("total_return"),
-                        report.get("annual_return"),
-                        report.get("sharpe_ratio"),
-                        report.get("max_drawdown_pct"),
-                        report.get("win_rate"),
-                        report.get("total_trades"),
-                        run_id,
-                    ),
-                )
-
-                # 保存交易明细
-                for t in report.get("trades", []):
-                    conn.execute(
-                        """INSERT INTO backtest_trades
-                           (backtest_id, symbol, side, entry_time, entry_price,
-                            quantity, pnl, pnl_pct)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        """UPDATE backtest_runs SET
+                           status='completed',
+                           final_value=?,
+                           total_return=?,
+                           annual_return=?,
+                           sharpe_ratio=?,
+                           max_drawdown=?,
+                           win_rate=?,
+                           total_trades=?
+                           WHERE id=?""",
                         (
+                            report.get("final_value"),
+                            report.get("total_return"),
+                            report.get("annual_return"),
+                            report.get("sharpe_ratio"),
+                            report.get("max_drawdown_pct"),
+                            report.get("win_rate"),
+                            report.get("total_trades"),
                             run_id,
-                            t.get("symbol"),
-                            t.get("side"),
-                            t.get("time"),
-                            t.get("price"),
-                            t.get("quantity"),
-                            t.get("pnl"),
-                            t.get("pnl", 0) / (abs(t.get("price", 1)) * t.get("quantity", 1))
-                            if t.get("price") and t.get("quantity") else 0,
                         ),
                     )
 
-            logger.info(f"回测完成: run_id={run_id}")
+                    # 保存交易明细
+                    for tr in report.get("trades", []):
+                        conn.execute(
+                            """INSERT INTO backtest_trades
+                               (backtest_id, symbol, side, entry_time, entry_price,
+                                quantity, pnl, pnl_pct)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                run_id,
+                                tr.get("symbol"),
+                                tr.get("side"),
+                                tr.get("time"),
+                                tr.get("price"),
+                                tr.get("quantity"),
+                                tr.get("pnl"),
+                                tr.get("pnl", 0) / (abs(tr.get("price", 1)) * tr.get("quantity", 1))
+                                if tr.get("price") and tr.get("quantity") else 0,
+                            ),
+                        )
 
-        except Exception as e:
-            logger.error(f"回测异常 (run_id={run_id}): {e}", exc_info=True)
-            with get_connection() as conn:
-                conn.execute(
-                    "UPDATE backtest_runs SET status='failed', error_message=? WHERE id=?",
-                    (str(e), run_id),
-                )
+                t.progress(1)
+                logger.info(f"回测完成: run_id={run_id}")
+                t.complete(result={
+                    "run_id": run_id,
+                    "final_value": report.get("final_value"),
+                    "total_return": report.get("total_return"),
+                    "sharpe_ratio": report.get("sharpe_ratio"),
+                    "max_drawdown_pct": report.get("max_drawdown_pct"),
+                    "win_rate": report.get("win_rate"),
+                    "total_trades": report.get("total_trades"),
+                })
+
+            except Exception as e:
+                logger.error(f"回测异常 (run_id={run_id}): {e}", exc_info=True)
+                with get_connection() as conn:
+                    conn.execute(
+                        "UPDATE backtest_runs SET status='failed', error_message=? WHERE id=?",
+                        (str(e), run_id),
+                    )
+                t.fail(str(e))
 
     threading.Thread(target=_run, daemon=True).start()
-    return jsonify({"message": "回测已启动", "run_id": run_id}), 202
+    return jsonify({
+        "message": "回测已启动", "run_id": run_id, "task_id": task_id,
+    }), 202
 
 
 @backtest_bp.route("/api/backtest/runs", methods=["GET"])

@@ -1,115 +1,140 @@
 <template>
   <div class="portfolio-page">
-    <el-page-header @back="$router.push('/dashboard')" title="返回" />
-    <h2 class="page-title">组合管理</h2>
+    <PageHeader
+      title="组合管理"
+      subtitle="实时持仓、收益与风控规则参考"
+    >
+      <template #actions>
+        <el-button :icon="Refresh" :loading="loading" @click="loadData">
+          刷新
+        </el-button>
+      </template>
+    </PageHeader>
 
-    <el-row :gutter="20">
-      <!-- 组合概览 -->
-      <el-col :span="8">
-        <el-card shadow="hover">
-          <template #header>
-            <span class="card-title">组合概览</span>
-          </template>
+    <div class="portfolio-grid">
+      <!-- 左侧：概览 -->
+      <div class="left-panel">
+        <ModernCard title="组合概览">
+          <div class="total-value">
+            <div class="total-value__label">总资产</div>
+            <div class="total-value__num">¥{{ formatNum(portfolio.total_value) }}</div>
+          </div>
 
-          <el-statistic title="总资产" :value="portfolio.total_value?.toFixed(2) || '0'" prefix="¥" />
           <el-divider />
 
-          <el-descriptions :column="1" border size="small">
-            <el-descriptions-item label="可用资金">
-              ¥{{ (portfolio.cash || 0).toFixed(2) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="持仓市值">
-              ¥{{ (portfolio.positions_value || 0).toFixed(2) }}
-            </el-descriptions-item>
-            <el-descriptions-item label="累计盈亏">
-              <span :class="(portfolio.cumulative_pnl || 0) >= 0 ? 'profit' : 'loss'">
-                ¥{{ (portfolio.cumulative_pnl || 0).toFixed(2) }}
-              </span>
-            </el-descriptions-item>
-            <el-descriptions-item label="日度收益">
-              {{ portfolio.daily_return != null ? (portfolio.daily_return * 100).toFixed(4) + '%' : '-' }}
-            </el-descriptions-item>
-            <el-descriptions-item label="快照日期">
-              {{ portfolio.date || '无数据' }}
-            </el-descriptions-item>
-          </el-descriptions>
+          <div class="overview-fields">
+            <div class="overview-field">
+              <div class="overview-field__label">可用资金</div>
+              <div class="overview-field__value">¥{{ formatNum(portfolio.cash) }}</div>
+            </div>
+            <div class="overview-field">
+              <div class="overview-field__label">持仓市值</div>
+              <div class="overview-field__value">¥{{ formatNum(portfolio.positions_value) }}</div>
+            </div>
+            <div class="overview-field">
+              <div class="overview-field__label">累计盈亏</div>
+              <div
+                class="overview-field__value"
+                :class="(portfolio.cumulative_pnl || 0) >= 0 ? 'num-up' : 'num-down'"
+              >
+                ¥{{ formatNum(portfolio.cumulative_pnl) }}
+              </div>
+            </div>
+            <div class="overview-field">
+              <div class="overview-field__label">日度收益</div>
+              <div class="overview-field__value">
+                {{ portfolio.daily_return != null ? (portfolio.daily_return * 100).toFixed(4) + '%' : '—' }}
+              </div>
+            </div>
+            <div class="overview-field overview-field--full">
+              <div class="overview-field__label">快照日期</div>
+              <div class="overview-field__value text-secondary">{{ portfolio.date || '无数据' }}</div>
+            </div>
+          </div>
+        </ModernCard>
+      </div>
 
-          <el-button style="margin-top:12px" size="small" @click="loadData" :loading="loading">
-            刷新
-          </el-button>
-        </el-card>
-      </el-col>
-
-      <!-- 持仓列表 -->
-      <el-col :span="16">
-        <el-card shadow="hover">
-          <template #header>
-            <span class="card-title">当前持仓 ({{ positions.length }})</span>
-          </template>
-
-          <el-table :data="positions" stripe size="small">
-            <el-table-column prop="symbol" label="代码" width="100" />
-            <el-table-column prop="quantity" label="持仓数量" width="100" />
-            <el-table-column label="持仓成本" width="100">
+      <!-- 右侧：持仓 + 风控 -->
+      <div class="right-panel">
+        <ModernCard :title="`当前持仓 (${positions.length})`">
+          <el-table :data="positions" :empty-text="'暂无持仓'">
+            <el-table-column prop="symbol" label="代码" width="120">
               <template #default="{ row }">
-                ¥{{ (row.avg_cost || 0).toFixed(2) }}
+                <span class="code-cell">{{ row.symbol }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="现价" width="100">
+            <el-table-column prop="quantity" label="持仓数量" width="120" align="right">
               <template #default="{ row }">
-                ¥{{ (row.current_price || 0).toFixed(2) }}
+                <span class="num">{{ row.quantity ?? 0 }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="未实现盈亏" width="120">
+            <el-table-column label="持仓成本" width="120" align="right">
               <template #default="{ row }">
-                <span :class="(row.unrealized_pnl || 0) >= 0 ? 'profit' : 'loss'">
-                  ¥{{ (row.unrealized_pnl || 0).toFixed(2) }}
+                <span class="num">¥{{ formatNum(row.avg_cost) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="现价" width="120" align="right">
+              <template #default="{ row }">
+                <span class="num">¥{{ formatNum(row.current_price) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="未实现盈亏" width="140" align="right">
+              <template #default="{ row }">
+                <span :class="(row.unrealized_pnl || 0) >= 0 ? 'num-up' : 'num-down'">
+                  ¥{{ formatNum(row.unrealized_pnl) }}
                 </span>
               </template>
             </el-table-column>
-            <el-table-column label="已实现盈亏" width="120">
+            <el-table-column label="已实现盈亏" width="140" align="right">
               <template #default="{ row }">
-                <span :class="(row.realized_pnl || 0) >= 0 ? 'profit' : 'loss'">
-                  ¥{{ (row.realized_pnl || 0).toFixed(2) }}
+                <span :class="(row.realized_pnl || 0) >= 0 ? 'num-up' : 'num-down'">
+                  ¥{{ formatNum(row.realized_pnl) }}
                 </span>
               </template>
             </el-table-column>
             <el-table-column prop="strategy_id" label="策略ID" min-width="120" />
           </el-table>
+        </ModernCard>
 
-          <el-empty v-if="!positions.length" description="暂无持仓" />
-        </el-card>
-
-        <!-- 风控规则说明 -->
-        <el-card shadow="hover" style="margin-top: 16px">
-          <template #header>
-            <span class="card-title">风控规则参考</span>
-          </template>
-          <el-table :data="riskRules" stripe size="small">
+        <ModernCard title="风控规则参考" description="系统内置的默认风控规则">
+          <el-table :data="riskRules" :empty-text="'暂无规则'">
             <el-table-column prop="name" label="规则名称" width="180" />
             <el-table-column prop="description" label="说明" />
-            <el-table-column label="参数" width="200">
+            <el-table-column label="参数" width="240">
               <template #default="{ row }">
-                <el-tag v-for="(v, k) in row.params" :key="k" size="small" style="margin-right:4px">
-                  {{ k }}: {{ v }}
-                </el-tag>
+                <span
+                  v-for="(v, k) in row.params"
+                  :key="k"
+                  class="param-chip"
+                >{{ k }}: {{ v }}</span>
               </template>
             </el-table-column>
           </el-table>
-        </el-card>
-      </el-col>
-    </el-row>
+        </ModernCard>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { Refresh } from '@element-plus/icons-vue'
 import { getPortfolio, getPositions, getRiskRules } from '../api'
+import PageHeader from '../components/ui/PageHeader.vue'
+import ModernCard from '../components/ui/ModernCard.vue'
 
 const portfolio = ref({})
 const positions = ref([])
 const riskRules = ref([])
 const loading = ref(false)
+
+function formatNum(v) {
+  if (v == null) return '0'
+  return Number(v).toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+}
 
 async function loadData() {
   loading.value = true
@@ -133,20 +158,97 @@ onMounted(loadData)
 </script>
 
 <style scoped>
-.page-title {
-  margin: 16px 0;
-  font-size: 20px;
-  font-weight: 600;
+.portfolio-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
-.card-title {
-  font-weight: 600;
+.portfolio-grid {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: var(--space-4);
+  align-items: start;
 }
-.profit {
-  color: #e32525;
-  font-weight: 600;
+.right-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
 }
-.loss {
-  color: #1ca01c;
-  font-weight: 600;
+.total-value {
+  text-align: center;
+  padding: var(--space-3) 0;
+}
+.total-value__label {
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+  margin-bottom: var(--space-1);
+}
+.total-value__num {
+  font-size: var(--text-4xl);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.overview-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.overview-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-divider);
+}
+.overview-field:last-child { border-bottom: none; }
+.overview-field--full {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+}
+.overview-field__label {
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+}
+.overview-field__value {
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+.code-cell {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+.num {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+}
+.num-up {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-semibold);
+  color: var(--color-up);
+}
+.num-down {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-semibold);
+  color: var(--color-down);
+}
+.param-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  margin-right: 4px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  background: var(--color-bg-muted);
+  color: var(--color-text-secondary);
 }
 </style>

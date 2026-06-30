@@ -243,6 +243,51 @@ dev 模式**单命令启动 + 热更新**：
 
 基于 Axios 封装，携带 JWT Bearer token，baseURL `/api`。
 
+### 4.6 舆情监控因子化闭环（2026-06-29）
+
+舆情监控页不再只是手动列表页，而是“可观测的数据生产线”：目标是每天盘后稳定产出可被策略层消费的 `sentiment_scores` + `sentiment_indicators`，并把数据鲜度、调度健康、热点股票覆盖率直接暴露在页面顶部。
+
+**生产链路**：
+
+```
+工作日 16:00 daily_sentiment
+  → batch_analyze(enabled sentiment_config)
+  → 写 sentiment_scores / sentiment_post_labels / sentiment_indicators
+
+工作日 16:05 daily_top_picks
+  → refresh_top_picks(top 100)
+  → analyze_top_picks(top N，默认 20，受 SENTIMENT_TOP_PICKS_ANALYZE_LIMIT 控制)
+  → 热点股票即使未加入关注列表，也能形成当日情绪样本
+
+工作日 16:35 daily_indicators_recompute
+  → recompute_all_for_today()
+  → 补齐 EMA3/EMA5、panic/euphoria、momentum_cross
+```
+
+**可观测性要求**：
+
+- 页面顶部必须展示「舆情状态总览」：一行研判结论（偏多/偏空/中性，由监控股均分 + 极端信号计数综合判定）、4 个核心指标（监控股今日产出、热门股池覆盖、因子覆盖、极端信号）、关键调度最近状态、guba 熔断/cookie 告警条。
+- 页面主体按 tab 分区：我的监控 / 热门股池 / 全市场观测（含指数聚合 + 成分股），首屏只渲染当前 tab。
+- `daily_sentiment` / `daily_top_picks` / `daily_indicators_recompute` 的异常必须让 `TaskRunner` 和 `scheduler_task_run` 记录为 `failed`，不能只写日志后返回成功。
+- 热门股池列表必须显示最新情绪分、立场、分析日期；没有分析结果时显示“待分析”，避免用户误以为已经纳入因子。卡片描述须显示 daily_top_picks 最近刷新时间与下次定时时间，让「每天定时刷新」可见可验证。
+- 手动刷新热门股池可选择同步分析 top N，并通过 `task_id` 进入统一任务台轮询。
+
+**生产可靠性约束（v7, 2026-06-29）**：
+
+- 批量分析进度必须落 `task_runs` 表（`result_json` 存运行中快照 `{done, failed, current, current_name}`），`GET /api/sentiment/batch_analyze_status` 从 DB 读，跨进程可用。严禁新增 `_BATCH_STATE` 类模块级内存 dict（Phase B 约束）。
+- `/api/sentiment/universe/progress` 全走 DB 聚合，不依赖进程内内存态。
+- `/api/sentiment/latest` 必须用批量查询（`get_sentiment_latest_overview`，3 条 SQL），不得 per-config 循环查（N+1）。
+- universe 写 `sentiment_universe_scores` 时，panic/euphoria 信号键名必须与 `sentiment_service` 写入的 `signals_json` 一致（`panic`/`euphoria`/`momentum_cross`），不得用 `panic_2sigma`/`euphoria_2sigma`。
+- `analyze_sentiment` 对 LLM 空响应/解析失败必须返回 `_err("parse_error", ...)` 契约错误，不得返回 `None`。
+- guba cookie 失效（warmup 后详情页仍返回引导壳）时，`/api/sentiment/circuit_status` 返回 `cookie_stale: true`，前端顶部告警；需人工更新 `_GUBA_BOOTSTRAP_COOKIES` 后重启并 `POST /api/sentiment/circuit_reset` 清除告警。
+- `top_picks` 数据源（`ak.stock_zh_a_spot` 新浪源）必须有 3 次指数退避重试；`analyze_top_picks` 必须并发（ThreadPoolExecutor）且支持 `task_runner.check_cancelled()`。
+
+**量化因子口径**：
+
+- `sentiment_scores.score`：0-100，多空有效样本中的看多比例；低分=悲观/恐慌，高分=乐观/狂热。
+- `sentiment_indicators`：策略优先消费 `ema3`、`ema5`、`panic_signal`、`euphoria_signal`、`momentum_cross`，而不是直接消费单日 LLM 文本。
+- `sentiment_top_picks`：用于发现市场当日交易热度最高的候选股票，默认只分析 top 20 控制 LLM 成本；top 100 仍保留为观察池。
+
 ## 5. API 端点
 
 | Method | Path | 说明 | 认证 |
@@ -279,8 +324,10 @@ dev 模式**单命令启动 + 热更新**：
 | POST | `/api/sentiment/posts/<id>/mark_broken` | 标记为垃圾（前端展示时过滤） | 是 |
 | POST | `/api/sentiment/posts/<id>/reset` | 重置审计状态为 pending | 是 |
 | POST | `/api/sentiment/fetch` | 仅拉取帖子缓存（不调 LLM）：`{stock_code, days, fetch_content, audit}` | 是 |
-| GET | `/api/sentiment/circuit_status` | guba 熔断器状态 | 是 |
-| POST | `/api/sentiment/circuit_reset` | 手动重置 guba 熔断器 | 是 |
+| GET | `/api/sentiment/top_picks` | 获取最新热门股池；返回 rank/成交额/是否监控/最新情绪分与分析日期 | 是 |
+| POST | `/api/sentiment/top_picks/refresh` | 异步刷新热门股池；body: `{top_n, auto_add, analyze_limit}`，返回 `task_id` | 是 |
+| POST | `/api/sentiment/top_picks/analyze` | 异步分析当前热门股 top N；body: `{limit}`，返回 `task_id` | 是 |
+| GET | `/api/sentiment/health` | 舆情因子生产线健康：覆盖率、数据鲜度、热门股今日分析覆盖、关键调度最近运行与下一次运行 | 是 |
 | GET | `/api/zhihu/users` | 监控的知乎用户列表 | 是 |
 | POST | `/api/zhihu/users` | 新增知乎用户监控 | 是 |
 | DELETE | `/api/zhihu/users/<id>` | 移除监控 | 是 |
@@ -791,12 +838,13 @@ zhihu_check_task: every ZHIHU_CHECK_INTERVAL_HOURS hours
 
 ### 10.10 风险与边界
 
-- **反爬措施（实测发现）**：知乎 `/api/v4/members/{token}/articles` 与 `/answers` 端点对**未登录**请求返回 401/403。处理：
-  1. **登录态 cookie 注入**：通过 `.env` 的 `ZHIHU_COOKIE` 配置（整段 Cookie header 值，如 `z_c0=...; d_c0=...; _xsrf=...`），代码读出来构造 `RequestsCookieJar` 注入到所有请求
-  2. **CDN profile 错位**：`/api/v4/members/{token}` 在某些节点会返回 200 + 错位 `name`（典型注入 "Makise kurisu"），但 `url_token`、articles、answers 内容都是目标用户的。处理：`_looks_like_noise_name()` 启发式判断 name 是否可信，不可信则用 `url_token` 兜底
-  3. `_request` 对 401/403/429 一律立即返回 `None`（不重试 401/403，避免触发更严的限流；429 留给上层调度降低频率）
-  4. `POST /api/zhihu/users` 在抓取失败时仍保存监控记录（url_token + 占位资料），后续刷新再补全
-  5. `zhihu_users.last_error` 字段记录最后一次失败原因
+- **反爬措施（实测发现）**：知乎 `/people/{token}/posts`、`/pins` 等动态接口对纯 HTTP 请求返回 403（650 字节固定拦截页），**带登录态 cookie 也挡**（2026-06-30 实测 `ZHIHU_COOKIE` 含 `z_c0` 仍 403）。处理（v4, 2026-06-30）：
+  1. **反爬熔断器** `ZhihuCircuitBreaker`（`zhihu_service.py`）：连续 5 次 403 → 打开熔断，后续 `refresh_user` 静默跳过（返回 `circuit_open`，`fetched=0`），冷却 600s 后半开探测。避免旧逻辑每 tick 8 用户 × 3 端点 × 3 重试 = 72 条 WARNING 刷屏。
+  2. **403 不重试**：确定性反爬，重试纯浪费。仅 429/503 限流才指数退避重试。
+  3. **携带 `ZHIHU_COOKIE`**（若配置）：部分 SSR 页面对登录态仍认，能救一个是一个；不强制依赖。
+  4. **冷启动不立即跑 `zhihu_check`**：`scheduler.py` 仅 `forum_prefetch` 启动即跑（guba 列表页不依赖 cookie，可 warm 缓存）；`zhihu_check` 走正常调度，避免每次重启砸一片 403。
+  5. `POST /api/zhihu/users` 在抓取失败时仍保存监控记录（url_token + 占位资料），后续刷新再补全
+  6. `zhihu_users.last_error` 字段记录最后一次失败原因
 - **安全要求**：`ZHIHU_COOKIE` **绝不能** commit 到 git，`.env` 必须在 `.gitignore` 中；建议用专门小号，避免暴露主账号；浏览器退出登录会立刻使 `z_c0` 失效
 - **已知大V的 url_token**：用户输入的 `https://www.zhihu.com/people/{token}` 末段需为**真实账号**的 url_token，不是显示名。如 `hongliqi`（洪灝）若不通，请通过浏览器登录后查看个人主页 URL 确认。
 - 隐私：仅抓取公开内容；存储的 `content_text` 用于二次分析，不外发
@@ -1595,6 +1643,166 @@ v6 上线后将设计提交 GPT / Gemini 双评审，两者结论高度收敛：
 
 - **ML 自动定权重**（用户提出）：以「输入=各分量权重，目标=预测未来 7 天指数涨跌」训练模型。结论是**另开会话单独做**，且应作为独立「预测叠加层」而非替换可解释的温度计主输出（避免身份危机：温度计描述「现在多恐慌」vs 预测器预测「未来涨跌」）。关键约束：7 天重叠标签样本自相关需 purged walk-forward 验证；QVIX 可回溯 2015，但 PCR/涨跌停/融资的联合可用历史待验证
 
+## 11F. VIX 2.0 — 机器学习因子权重（2026-06-29）
+
+### 11F.1 背景与定位
+
+v6.1 是**手工定权重**的恐惧贪婪温度计，衡量「当前波动/情绪强度」，但**不衡量「这个位置作为底/顶有多好」**。实证矛盾：2025-04-07（关税冲击大底）composite_pct 仅 1.6%，2026-03-23（另一次大底）1.2%，更深的 4-07 反而读数略高——原始 IV 只反映预期波动，没有前瞻收益校准。
+
+VIX 2.0 = 用机器学习从历史学到「哪些因子、以多大权重，最能提前识别底/顶」，产出与**前瞻市场结果**对齐的 0-100 分。**关键约束：v6.1 完全不动**，VIX 2.0 作为并行第二套指标（独立表 / 独立 API / 前端独立卡片），两套可同屏对比。完整设计书见 `docs/vix2-ml-design.md`。
+
+### 11F.2 方法选型
+
+| 维度 | 选择 | 理由 |
+|------|------|------|
+| 标签 | 三隘栏（Triple-Barrier, López de Prado） | 用止盈/止损/时间三 barrier 给每天打「未来涨/跌」标签，天然对齐底/顶，比固定 N 日收益稳健 |
+| 模型 | 正则化逻辑回归（L2, class_weight='balanced'） | 可解释——直接产出每因子学习权重，正好对应「用 ML 找因子权重」诉求；样本不多时比树/DL 稳健 |
+| 数据 | 长历史核心因子（11 个，回溯 2016-02） | QVIX 可回溯 2015-02，252 日 Z-Score 窗口后有效样本从 2016-02 起，~2500 行 |
+
+### 11F.3 因子集（core）
+
+`qvix_50` / `qvix_50_z`(252日Z) / `qvix_50_chg5` / `rv_hs300`(GK) / `rv_qvix_spread`(方差风险溢价) / `ma60_dev` / `mom_20d` / `mom_60d` / `new_high_ratio` / `drawdown_252` / `dist_low_252`。全部 point-in-time（trailing 窗口，无未来泄漏）。增强因子（多 ETF/PCR/涨跌停/融资）放 `feature_set='enhanced'` 留待后续。
+
+### 11F.4 标签与分数
+
+三隘栏：`entry=close[t]`，`upper=entry*(1+pt*scale)`，`lower=entry*(1-sl*scale)`，`vertical=t+H`；默认 pt=sl=0.05，H=20，barrier 按近 20 日日波动率动态缩放（clip 0.5~3×）。先触 upper→label=+1（底侧），先触 lower→-1（顶侧），到期按方向。训练目标 `P(label=+1)`；**VIX2 score = (1−P_up)×100**，与 v6.1 同口径（低分=恐慌=机会）。regime 沿用 `classify_by_percentile`（近 252 日滚动百分位）。
+
+### 11F.5 防泄漏
+
+特征仅用 t 日收盘后已知信息；标签用 t 之后 H 日未来价；CV 用 `TimeSeriesSplit`（前段训练→后段验证，**禁止随机 KFold**）；最近 252 样本留作纯样本外评估。`StandardScaler → LogisticRegression(C=网格搜索, ROC-AUC 选优)`；固定 `random_state=42` 保证复现。
+
+### 11F.6 工程落地
+
+| 项 | 内容 |
+|----|------|
+| 文件 | `services/vix2_features.py`（因子）/ `vix2_labels.py`（三隘栏）/ `vix2_model.py`（训练/CV/落盘/加载/推断）/ `vix2_service.py`（推断·回填·百分位编排）/ `api/routes/vix2.py`（5 端点）/ `scripts/train_vix2.py`（离线训练 CLI） |
+| 落盘 | `data/models/vix2_<version>.joblib`（Pipeline）+ `.json`（元数据+权重+scaler）+ `vix2_latest.json`（生效指针） |
+| DB 表 | `vix2_history`（date PK / p_up / score / percentile / regime / model_version / features_json）——独立于 vix_history |
+| task_kind | `vix2_train` / `vix2_backfill`（均走 TaskRunner，返回 32-hex task_id） |
+| 调度 | 接在 `daily_vix_task` 中 v6.1 之后：推断当日 → 重算百分位；模型未训练则静默跳过 |
+
+### 11F.7 API
+
+| Method | Path | 说明 |
+|--------|------|------|
+| GET | `/api/vix2` | 最新快照 + 模型状态 |
+| GET | `/api/vix2/history?days=365` | 历史序列 |
+| GET | `/api/vix2/model` | 模型元数据 + 因子权重（前端权重条形图） |
+| POST | `/api/vix2/train` | 触发离线重训（TaskRunner，返回 task_id） |
+| POST | `/api/vix2/backfill` | 用当前模型回填历史 score（TaskRunner，返回 task_id） |
+
+前端 `VixView.vue` 新增「VIX 2.0（机器学习）」卡片：大数字 score + regime tag + P_up/百分位、模型信息行（version/OOS-AUC/CV-AUC/样本/训练区间）、因子权重双向条形图（按 |系数| 排序）、重训/回填按钮（task 轮询）。
+
+### 11F.8 实验结论：当前因子集无稳健预测力（如实呈现，2026-06-29）
+
+**定位：实验性特性，不可用于交易。** 经过完整的 barrier 参数扫描 + 严格的 embargoed walk-forward 验证，结论是：当前 11 个线性因子对 A 股 2016–2026 大底/大顶 **没有稳健的前瞻预测力**。
+
+**首版 core 模型**（pt=sl=0.05, H=20）：CV-AUC≈0.47，OOS-AUC≈0.51，接近随机；在两个已知大底把 3-23 排得比 4-07 更极端，不满足设计书 §6「相对排序更合理」验收标准。
+
+**barrier 参数扫描**（`scripts/sweep_vix2.py`，40 组配置：H∈{10,20,40,60} × 5 组 pt/sl × rv∈{T,F}）：
+- CV-AUC 全程 0.40–0.48（普遍低于随机）。
+- 单切分 OOS-AUC 仅在 H=60 时升到 0.60–0.65（如 pt=0.1/sl=0.07/H=60 达 0.65）。**但这是重叠标签（overlapping labels）造成的人为假象**——长 horizon 下测试窗内独立观测极少，AUC 被自相关抬高。
+
+**embargoed walk-forward 验证**（`scripts/robust_vix2.py`，对 4 个候选切 6 个连续 OOS 区块，每块训练时扣除 H 天 embargo 杜绝标签泄漏）：
+- 全部候选跨块均值 AUC ≈ 0.49–0.50，区块间剧烈摆动（如 H=60 那个「0.65」配置实测 blocks=[0.531, 0.521, 0.513, 0.311, 0.4, 0.668] → mean=0.491±0.112）。
+- 真信号应跨块稳定 >0.5；这里塌回 ~0.5，确认单切分 0.65 是假象而非真信号。
+
+**结论：基础设施（特征/标签/训练/落盘/推断/API/前端/调度）已完整可用且可复现，但当前因子集无法产生可交易的信号，整个特性按「实验性 / 接近随机 / 不可作为交易依据」对待。** v6.1 行为完全未变（vix_history 未被触碰）。前端 VIX2 卡片采用用户导向的「研究状态面板」：优先展示“当前不能用于交易 / 为什么不能用 / 今天读数只能如何看”，把模型版本、样本区间、因子权重折叠到研究细节里，避免用户把单日分数或权重条误读成交易信号。
+
+后续若要继续：需引入非线性模型或增强因子集（基本面/资金面/跨市场）、或改用事件研究式标签，并保留 embargoed walk-forward 作为唯一可信的验收口径——单切分 OOS-AUC 在长 horizon 下不可信。
+
+### 11F.9 赛道 A 研究 spike：跨市场因子 + 非线性模型（2026-06-29）
+
+按「先过模型有效性闸门、再工程化」原则，对赛道 A（提升预测力）做了不落盘、不改生产代码的研究 spike（`scripts/spike_vix2_xmkt.py`）。
+
+**新增长历史跨市场因子**（均回溯 >2016，不截断 2504 样本；覆盖率 86.4%）：恒指 5 日收益 / 20 日已实现波动、美债 10Y 水平（滞后 1 交易日防前视）、美债 10Y 20 日变化、中美 10Y 利差、人民币中间价 20 日动量。
+
+**embargoed 6-block walk-forward 结果（核心口径 H=20）**：
+
+| 配置 | core-only | core+xmkt（线性） | core+xmkt（HistGBDT） |
+|------|-----------|-------------------|------------------------|
+| pt=0.07/sl=0.05/H=20 | 0.497 ± 0.073 | 0.526 ± 0.129 | — |
+| pt=0.05/sl=0.05/H=20/rv | 0.493 ± 0.079 | 0.516 ± 0.127 | **0.522 ± 0.065** |
+
+**结论（仍未过闸门）**：跨市场因子给短 horizon 带来**边际且高方差**的提升（线性均值 +0.02～0.03，但 std 几乎翻倍）；非线性 HistGBDT 在 core+xmkt 上拿到目前最优、方差最小的 **0.522 ± 0.065**，但仍低于设计书 §6 的 0.55 验收线，且所有配置在第 5 区块仍塌到 ~0.40–0.49。**判定：方向正确（跨市场 + 非线性优于纯线性 core），但单凭这两步尚不足以让 VIX2.0 通过有效性闸门、进入工程硬化阶段。** 维持「实验性 / 不可交易」定位不变；下一步候选为标签改造（A3，前瞻分位/事件研究）+ 更厚因子集，仍以 embargoed walk-forward 均值稳定 >0.55 为唯一放行标准。
+
+### 11F.10 严肃交易因子研究框架（替代玩具事件研究，2026-06-29）
+
+目标不是让单一 VIX/VIX2 数字直接发出买卖信号，而是构造一个**可被严格验证、可进入策略回测的市场择时因子**。第一原则：所有结论必须来自样本外预测，不接受事后分桶描述性统计作为“因子有效”。
+
+**交易定义（防止目标漂移）**：
+- 交易时点：t 日收盘后得到 VIX/恐慌贪婪与市场数据，t+1 开盘/收盘执行。
+- 预测目标：未来 `20` 个交易日上证综指/沪深300超额收益或风险调整收益；辅助看 `5/10/60` 日。
+- 因子输出：连续分数 `vix_alpha_score`（越高=越适合提高权益仓位），不是离散提示语。
+- 用途：仓位调节/择时过滤，而非单独替代选股或交易系统。
+
+**可用特征池**：
+- v6.1 历史特征：`composite_percentile`、`composite_score`、`fear_greed`、`vix_zscore`、`vix_change_pct`、`vix_swing_pct`
+- 现货确认：`spot_ma60_dev`、`spot_mom_5d`、`spot_mom_20d`、`spot_new_high_ratio`
+- 长历史波动/位置特征：复用 VIX2 core features（QVIX、RV、动量、回撤、距底）
+- 跨市场特征：恒指、美债10Y（滞后1交易日）、中美利差、人民币中间价
+
+**研究方法**：
+1. 构造 point-in-time 数据集，所有特征必须在 t 日收盘后可知；美债类滞后 1 个 A 股交易日。
+2. 标签采用未来收益分位/风险调整收益，不再只用三隘栏分类：
+   - 回归标签：`fwd_ret_20d / realized_vol_20d`
+   - 排序标签：未来 20 日收益在滚动窗口内的分位
+   - 分类标签：未来 20 日收益是否跑赢中性阈值
+3. 模型先做三档：
+   - 线性基线：Ridge/Logistic（可解释）
+   - 非线性：HistGradientBoosting / XGBoost-like 浅树（捕捉状态交互）
+   - 简单规则基线：v6.1 composite_percentile 反向分数
+4. 验证必须使用 purged/embargoed walk-forward，输出每个 OOS 区块的**预测序列**，再计算：
+   - Rank IC / Pearson IC（预测分数 vs 未来收益）
+   - Top-Bottom 分层收益差
+   - 策略收益（仅基于 OOS 预测）：高分加仓、低分降仓
+   - 跨年份稳定性、换手、最大回撤、夏普
+
+**生产化闸门**：
+- OOS Rank IC 均值 > 0.03，且至少 60% OOS 区块为正；
+- Top-Bottom 20 日未来收益差 > 2%，且不是单一年份贡献；
+- OOS 策略夏普 > buy-and-hold，最大回撤下降；
+- 加入交易成本/滑点后仍有效；
+- 所有结果能一键复现，不能手工挑年份/挑参数。
+
+**2026-06-29 严格 OOS 结论**：`scripts/research_vix_alpha.py` 的直接收益/风险调整收益 alpha 路线未过闸门，baseline/core/core+xmkt/GBDT 的 OOS Rank IC 均为负或弱负，训练期自适应方向也没有识别出可交易反向关系。`scripts/research_vix_risk_factor.py` 修正回撤标签后显示：未来 20 日最大回撤预测未过闸门，Top-Bottom 回撤差为负或不稳定；但未来 20 日实现波动率预测显著有效，`baseline_qvix_risk` OOS RiskIC=0.3369、5/5 区块为正、Top-Bottom vol spread=3.69pct，`core_xmkt_risk_linear` OOS RiskIC=0.1898、4/4 区块为正、Top-Bottom vol spread=2.41pct，并在简单降仓策略中 Sharpe 0.76 vs buy-hold 0.40、最大回撤 -17.90% vs -28.09%。判定：VIX/恐慌指数暂不作为收益 alpha；可继续推进为 `vix_vol_risk_score`/风险预算因子，用于高预期波动期降低权益仓位或杠杆。
+
+**2026-06-29 稳健性复核**：`scripts/research_vix_vol_risk_robustness.py` 覆盖上证综指/沪深300、10/20/60 日 horizon、q60/q70/q80 三组阈值、0/5/10bps 成本。结论：10/20 日波动率风险预测稳健通过候选门槛，60 日不稳定，不进入生产口径。上证 H10/H20：`baseline_qvix` RiskIC≈0.343/0.337、5/5 区块为正、Top-Bottom vol spread=5.56/3.69pct；`core_xmkt_linear` RiskIC≈0.333/0.190、4/4 区块为正、10bps 成本后仍提升 Sharpe 并降低最大回撤。沪深300 H10/H20：`baseline_qvix` RiskIC≈0.386/0.350，`core_xmkt_linear` RiskIC≈0.330/0.111，均 100% 区块为正；但 QVIX 基线只改善回撤、不改善收益/Sharpe，core+xmkt 风险预算规则在 10bps 成本后仍明显改善 Sharpe 与最大回撤。生产候选为 `vix_vol_risk_score`：当前 live API 先服务最稳定、可解释、无需离线模型落盘的 QVIX 252 日 percentile 基线（默认 H=20 风险预算口径），并在 validation 中保留 core+xmkt linear 的研究证据；core+xmkt live 模型需完成训练产物序列化后再接入。输出风险等级与建议权益仓位上限，不输出买卖信号。
+
+**UI 原则**：在未过上述闸门前，前端只显示“研究中/未通过/可进入下一阶段回测”，不得显示暗示交易的买卖文案。通过后才允许把 `vix_alpha_score` 作为仓位建议输入展示。`vix_vol_risk_score` 只允许展示为“未来波动率风险/仓位上限参考”，不得显示为确定性买卖信号。
+
+### 11G. 恐惧贪婪构造效度重建（v7.0 手工版 + VIX2 重定向，2026-06-29）
+
+**问题**：v6.1 恐惧贪婪指数在两个真实事件上失效，暴露的不是权重没调好，而是构造原理缺陷：
+1. **2025-04-07（上证 3096，关税千股跌停）应最恐慌，但 fg=16.3；2026-03-23（上证 3813）价格高得多，fg=15.6 反而略更恐**。根因：指数锚定 IV *水平*（3-23 IV=51 > 4-07 IV=42），而真正的恐慌信号是价格回撤深度 + 跌停广度 + IV *飙升幅度*。4-07 当天 `limit_source != real`，跌停广度分量落到中性 50，最 decisive 的信号被静默丢弃。
+2. **2025-08 单边上涨（均线之上 6–10%、动量强劲）却进恐慌区**。根因：IV 从 20 涨到 31，`vix_score` 被推到极恐，而 VIX 在合成里占 60%，与现货贪婪分量抵消后合成分卡在 50。上涨趋势里的 IV 上升是行情波动放大，不是恐慌——构造无法区分“下跌恐慌”与“上涨波动”。
+3. **结构性死分量**：`rv_change_score` 全样本恒为 5.0（地板 bug）；`margin_change_score`/`limit_score` 长期 = 50（数据源非 real）。所谓 7 分量合成实际只有 IV + PCR 起作用，权重归一化后 IV 一家独大。
+
+**Construct-truth 恐惧分（两版共用真相定义）**：在 `backend/services/fear_greed_truth.py` 定义一个“市场真实情绪”的可计算锚，显式去耦 IV 水平：
+- **价格回撤锚（主导）**：close 距 trailing 60/252 日高点的回撤深度。越深越恐。这是修正两个案例的根基——4-07 深回撤应极恐、8 月在高位应无恐。
+- **趋势/体制门控**：均线之上 + 正动量 → 抑制恐惧（消灭 8 月假恐慌）；均线之下 + 负动量 → 放大。
+- **IV 飙升（变化率，非水平）**：QVIX 5 日变化率。突发飙升 → 恐慌，区分“崩盘 IV 跳”与“上涨 IV 漂”。
+- **广度崩塌**：跌停家数 / 下跌广度。4-07 的 decisive 信号；缺失时显式降权并标记，不静默中性。
+- **IV 水平仅作次级、体制门控后贡献**：仅在下跌体制里给 IV 水平话语权。
+
+**事件锚点校验集（construct validity，不是 alpha 验证）**：
+- 已知大底日应排到极恐分位：2025-04-07（3096）、2024 年内深底待补；
+- 已知大顶/高位日应排到极贪分位：2025-08 中下旬高位、2026-03 反弹高位；
+- 上涨波段不应进恐区（8 月反例）；
+- 底部单调性：回撤越深 + 跌停广度越大 → 越恐慌，单调成立；
+- 方向性 sanity：极恐后未来 20 日收益均值 > 0、极贪后 < 0（不要求强 alpha，只验方向常识）。
+
+**Track A — v7.0 手工恐惧贪婪重建**：
+1. 修死分量（`rv_change_score` 地板 bug；涨跌停/融资缺失时显式降权+标记，不静默中性）；
+2. 加价格体制锚 + 上涨趋势 IV 抑制门控；
+3. 底部单调性约束；
+4. 用同一套锚点 + 与 construct-truth 的 rank 相关做构造效度校验；
+5. 通过后冻结 v7.0，落库新列、前端 v6.1/v7.0 同屏对比，每日盘后打分，保留 v6.1 直到 v7.0 稳定。
+
+**Track B — VIX2 重定向**：VIX2 特征已含 `drawdown_252`/`ma60_dev`/`mom_20d`/`qvix_50_chg5`/`dist_low_252`（价格体制 + IV 飙升），缺的不是特征是**标签**。当前三隘栏标签是“未来涨跌方向”（收益 alpha 目标，已证明失败，且把 v6.1 的 IV 水平坑在 ML 里重踩）。重定向：把训练目标从 `P(未来涨)` 改为 **regression 逼近 construct-truth 恐惧分**（`vix2_truth_labels.build_truth_labeled_dataset` + `vix2_model.train_truth_model`，StandardScaler→Ridge，TimeSeriesSplit 选 alpha），VIX2 分数即变为“学习到的真实情绪状态估计”。**已验证（2026-06-29）**：旧 VIX2 三隘栏 OOS-AUC≈0.49、与 truth rank-IC=-0.37（反指）；重定向 Ridge 模型 CV R2=0.76、纯样本外 R2=0.85、MAE=4.25、RankIC=0.87，全样本与 truth rank-IC=0.925。学到的权重合理：`ma60_dev` 强负权（上涨抑制恐惧）、`qvix_50_z`/`rv_hs300`/`qvix_50_chg5` 正权（IV 飙升增恐）、`drawdown_252` 负权（回撤越深越恐）。锚点日验证：4-07 truth 88.6→预测 88.8、8-22 truth 3.7→预测 0、3-23 truth 84.9→预测 100。重定向 VIX2 已落盘为 `vix2-truth-*`，作为情绪因子候选展示。
+
+**口径约束**：v7.0 / VIX2 重定向版均只作为“市场情绪/风险位置参考”展示，不得显示为确定性买卖信号；`vix_vol_risk_score`（10/20 日波动率风险预算）保持独立、不与此情绪指数混用。
+
 ## 11. 舆情标题真实性审计（v1, 2026-06-04）
 
 ### 11.1 目标
@@ -1874,6 +2082,7 @@ daily_vix_task: cron weekday 16:30
    ```
    这些 cookie 来自真实浏览器会话，**不绑定用户**（guba 域通用反爬标识），跨帖子/跨股票复用验证通过
 3. **冷启动兜底** —— `_http_get_with_retry` 检测响应是 2.8KB 引导壳（cookie 失效）时，调用 `_warmup_guba_session()` 重新注入并重试 1 次
+   - **v8 2026-06-30 刷屏修复**：warmup 只是重新注入同一组硬编码 cookie，无法真正刷新。旧逻辑每个详情页请求都做 warmup + 打 2 行日志，1000+ 只股票刷屏。改为：一旦判定 `_COOKIE_STALE=True`，后续请求**静默降级**返回引导壳（上层 `fetch_post_full` 转 `fetch_error`，列表页标题仍可用），不再 warmup、不打日志；一次性 error 告警节流到每 5 分钟一次（防多线程竞争重复打）。
 4. **编码修正** —— guba 服务端不返回 `charset`，`requests` 会按 ISO-8859-1 兜底导致中文乱码。在 `fetch_post_full` 强制 `r.encoding = "utf-8"`（guba 实际就是 UTF-8）
 
 **辅助改动**（`fetch_post_full`，`forum_service.py:490-580`）：
@@ -2205,11 +2414,13 @@ A 股特有难点：股吧大量反话正说、正话反说。v3 在 prompt 里�
 
 | 参数 | v2 | v3 | 收益 |
 |------|-----|-----|------|
-| max_tokens | 16,384 | 512 | LLM 不再"够用就行"地灌满 |
+| max_tokens | 16,384 | 512 → **1024**（v8 2026-06-30） | LLM 不再"够用就行"地灌满；512 在 30+ 条帖子时被 minimax 换行/markdown 输出截断，丢尾 `]` → 解析失败 78% |
 | streaming | True | False | 批量场景关流式，省网络往返 |
 | temperature | 0.3 | 0.1 | 标签更稳定 |
 | thinking | 默认开 | **关（extra_body={"thinking":{"type":"disabled"}}，v4 2026-06-08 改用 langchain 原生字段）** | 单只 110s → **2.2s** |
 | 解析容错 | 30+ 行正则 | 15 行 JSON 解析 | 代码 -50% |
+| 截断恢复 | 无 | **v8：无闭合 `]` 时找最后一个完整 `}` 截断补 `]` 重试** | max_tokens 仍偶发截断时不再整只失败 |
+| 截断自适应重试 | 无 | **v8：检测到输出截断时按 max_tokens 2x/4x 重试（上限 4096），拿回完整标签集；到上限仍截断则交由解析器截断恢复兜底** | 超活跃股（100+ 帖）不丢尾部标签、不致得分偏倚 |
 
 **实测收益**：单只股票分析从 110s/13,707 字 → 预计 10-15s/~1KB；14 只 × 5 workers 批量从 ~8.5min → ~1min。
 
@@ -2443,10 +2654,11 @@ A 股散户舆情**反向指标**策略：
 | 模块 | 文件 | 状态 |
 |------|------|------|
 | 4 分类 prompt + 反讽规则 + 5-shot | `backend/services/sentiment_service.py:73-99` | ✅ |
-| LLM 性能配置（max_tokens=512, streaming=False, **extra_body 关 thinking**） | `sentiment_service.py:107-145` | ✅ |
+| LLM 性能配置（max_tokens=1024, streaming=False, **extra_body 关 thinking**） | `sentiment_service.py:107-145` | ✅ |
 | `_aggregate_labels` Python 聚合 | `sentiment_service.py:227-252` | ✅ |
 | `_compute_indicators` 时序因子 | `sentiment_service.py:255-294` | ✅ |
-| `_parse_labels_response` 新解析器 | `sentiment_service.py:610-657` | ✅ |
+| `_parse_labels_response` 新解析器（含 v8 截断恢复） | `sentiment_service.py` `_parse_labels_response` / `_extract_label_map` | ✅ |
+| 单公司结构化日志（拉取/LLM 输入/LLM 输出/结果分段 pretty-print） | `sentiment_service.py` `_log_section` | ✅ |
 | 写 sentiment_post_labels / sentiment_indicators | `sentiment_service.py:531-572` | ✅ |
 | 错误响应精细化（503 vs 500 + reason） | `backend/api/routes/sentiment.py:135-179` | ✅ |
 | 新表 schema（含 4 张表迁移） | `backend/core/database.py:149-225` | ✅ |
@@ -2880,7 +3092,7 @@ init_scheduler() at app boot:
   4. for row: get_job().next_run_time → 同步到 DB
 ```
 
-`JOB_REGISTRY` 10 项元数据存在 `backend/services/scheduler_config_service.py`，`env_fields` lambda 把 env var 包成 DB row 字段。`build_trigger()` 根据 `trigger_type` 选 CronTrigger/IntervalTrigger。`zhihu_check` / `forum_prefetch` 启动后立刻跑一次（`next_run_time=now()`），其余 cron 走正常调度。
+`JOB_REGISTRY` 10 项元数据存在 `backend/services/scheduler_config_service.py`，`env_fields` lambda 把 env var 包成 DB row 字段。`build_trigger()` 根据 `trigger_type` 选 CronTrigger/IntervalTrigger。`forum_prefetch` 启动后立刻跑一次（`next_run_time=now()`），其余（含 `zhihu_check`）走正常调度（v4 2026-06-30：zhihu_check 不再启动即跑，避免反爬 403 刷屏）。
 
 ### 16.5 立即生效机制
 
@@ -3463,3 +3675,36 @@ extreme + normal 共享同一 `markers` 数组，但渲染时分流——前端�
   财务段 6h 缓存已经在后端命中（akshare 不会被反复调），情绪段从 DB 读很轻，前端再做 cache 没收益。
 - **format.js 工具函数放组件目录而非 utils/**：这些函数强绑定"公司增强看板"语义，
   跟 stock/ 放一起更内聚；纯工具（比如日期格式化）才放 utils/。
+
+---
+
+## 99. 安全修复记录（2026-06-30）
+
+全项目审查发现的鉴权漏洞集中修复，均已在 `backend/api/` 落地并经 test_client 验证（无 token / `Bearer fake-token` → 401；合法 JWT → 200）。
+
+### 99.1 nav.py 假鉴权修复
+
+**问题**：`backend/api/routes/nav.py` 原本地重写了 `login_required` 装饰器，仅检查 `Authorization` 头是否以 `"Bearer "` 开头，**不校验 JWT 签名/过期**。`Bearer anything` 即可放行，净值模块全部写端点（转账/持仓/出金确认/参与方初始化）形同裸奔。
+
+**修复**：删除本地 `login_required` 与 `functools.wraps` import，改 `from backend.api.middleware import login_required`，复用真鉴权（`middleware.py:44`，含 `jwt.decode` 校验 + `g.current_user` 注入）。
+
+### 99.2 vix / vix2 端点补鉴权
+
+**问题**：`backend/api/routes/vix.py`（8 路由）、`vix2.py`（5 路由）**全部零鉴权**，含 `POST /api/vix/recompute`、`POST /api/vix/backfill`、`POST /api/vix2/train`、`POST /api/vix2/backfill` 等触发型写操作。未认证可反复触发 ML 训练 / 回填耗尽 CPU + 海量 DB 写入；GET 端点泄露模型因子权重。
+
+**修复**：两个蓝图所有路由补 `@login_required`（从 middleware import）。`app.py` 的 `before_request` 仅做日志、无全局鉴权兜底，故必须逐路由加装饰器。
+
+### 99.3 JWT_SECRET 弱默认值收紧
+
+**问题**：`backend/config.py` 原 `JWT_SECRET = _env("JWT_SECRET", "change-me-in-production-256bit")`，未配环境变量时回退到该公开字符串，可被攻击者伪造任意 JWT（与 99.1/99.2 叠加放大）。
+
+**修复**：移除公开默认值。未显式配置时用 `secrets.token_urlsafe(48)` 生成进程内随机密钥并打 WARNING —— 本地开发可用，但重启后 token 失效、多 worker 间不互通，倒逼生产/多 worker 部署显式设置。`.env.example` 同步改为留空 + 生成命令注释。
+
+### 99.4 已知未修（建议另起一轮）
+
+- `_UNIVERSE_BATCH_STATE` 内存 dict（`universe_service.py:47`）违反 Phase B、多 worker 跨进程失效。
+- APScheduler 多 worker 重复执行（`scheduler.py` + `gunicorn_config.py`）。
+- `_BATCH_LOCK` 多 worker 不防重入（`sentiment_service.py:862`）。
+- 触发型端点缺 `@rate_limit`（ops/sentiment/backtest）。
+- CORS 默认 `*`（docker-compose 覆盖）。
+- N+1 查询（`nav.py:86,240`、`forum_service.py:738`）。
