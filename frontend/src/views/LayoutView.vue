@@ -68,9 +68,6 @@ import {
   ChatDotRound,
   User,
   TrendCharts,
-  DataLine,
-  Briefcase,
-  Wallet,
   Timer,
   Document,
   Coin,
@@ -98,15 +95,6 @@ const navGroups = [
       { path: '/vix', label: 'VIX 恐慌指数', icon: TrendCharts },
       { path: '/zhihu', label: '知乎大V', icon: User },
       { path: '/financial-report', label: '财报解析', icon: Document },
-    ],
-  },
-  {
-    label: '量化交易',
-    items: [
-      { path: '/strategies', label: '策略', icon: TrendCharts },
-      { path: '/backtest', label: '回测', icon: DataLine },
-      { path: '/portfolio', label: '组合', icon: Briefcase },
-      { path: '/nav', label: '净值管理', icon: Wallet },
     ],
   },
   {

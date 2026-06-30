@@ -47,38 +47,6 @@ const routes = [
         name: 'Vix',
         component: () => import('../views/VixView.vue'),
       },
-      // 量化交易
-      {
-        path: 'strategies',
-        name: 'Strategies',
-        component: () => import('../views/StrategiesView.vue'),
-      },
-      {
-        path: 'backtest',
-        name: 'Backtest',
-        component: () => import('../views/BacktestView.vue'),
-      },
-      {
-        path: 'portfolio',
-        name: 'Portfolio',
-        component: () => import('../views/PortfolioView.vue'),
-      },
-      // 净值管理
-      {
-        path: 'nav',
-        name: 'NAVManage',
-        component: () => import('../views/NAVManageView.vue'),
-      },
-      {
-        path: 'nav/transfers',
-        name: 'TransferRecords',
-        component: () => import('../views/TransferRecordView.vue'),
-      },
-      {
-        path: 'nav/positions',
-        name: 'PositionSnapshot',
-        component: () => import('../views/PositionSnapshotView.vue'),
-      },
       // 知乎大V监控
       {
         path: 'zhihu',

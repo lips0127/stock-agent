@@ -43,10 +43,6 @@ from backend.api.routes.market import market_bp
 from backend.api.routes.stock import stock_bp
 from backend.api.routes.ops import ops_bp
 from backend.api.routes.sentiment import sentiment_bp, init_stock_cache
-from backend.api.routes.strategies import strategies_bp
-from backend.api.routes.backtest import backtest_bp
-from backend.api.routes.quant import quant_bp
-from backend.api.routes.nav import nav_bp
 from backend.api.routes.zhihu import zhihu_bp
 from backend.api.routes.intraday import intraday_bp
 from backend.api.routes.vix import vix_bp
@@ -182,10 +178,6 @@ def create_app() -> Flask:
     app.register_blueprint(stock_bp)
     app.register_blueprint(ops_bp)
     app.register_blueprint(sentiment_bp)
-    app.register_blueprint(strategies_bp)
-    app.register_blueprint(backtest_bp)
-    app.register_blueprint(quant_bp)
-    app.register_blueprint(nav_bp)
     app.register_blueprint(zhihu_bp)
     app.register_blueprint(intraday_bp)
     app.register_blueprint(vix_bp)

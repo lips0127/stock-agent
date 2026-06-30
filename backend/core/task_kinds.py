@@ -6,7 +6,6 @@
 TASK_KINDS: dict[str, dict] = {
     "scan_index":                     {"label": "红利指数扫描",    "icon": "📡", "category": "扫描"},
     "scan_full":                      {"label": "全市场扫描",      "icon": "🔭", "category": "扫描"},
-    "backtest":                       {"label": "策略回测",        "icon": "🧪", "category": "量化"},
     "sentiment_batch":                {"label": "舆情批量分析",    "icon": "💬", "category": "舆情"},
     "sentiment_single":               {"label": "单股舆情分析",    "icon": "💬", "category": "舆情"},
     "sentiment_universe":             {"label": "全市场舆情爬取",  "icon": "🌐", "category": "舆情"},

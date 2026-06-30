@@ -34,12 +34,8 @@
 | `routes/stock.py` | `GET /api/stock/<symbol>` — 单只股票详情 |
 | `routes/stock_dashboard.py` | `GET /api/stock/<symbol>/dashboard` — 公司增强看板：聚合 stock_metrics + 财务数据 + 情绪历史（v6 2026-06-15） |
 | `routes/sentiment.py` | 舆情监控 CRUD + LLM 情绪分析 + 标题真实性审计 |
-| `routes/strategies.py` | `GET /api/strategies` — 列出已注册策略 |
-| `routes/backtest.py` | `POST /api/backtest/run`、`GET /api/backtest/runs`、`GET /api/backtest/runs/<id>` |
-| `routes/quant.py` | `GET /api/quant/portfolio`、`GET /api/quant/positions`、`GET /api/quant/risk/rules` |
 | `routes/zhihu.py` | 知乎大V监控：用户/动态/分析/邮件订阅/SMTP 配置、大V时间线聚合 |
 | `routes/intraday.py` | 市场分时K线：A股30分钟K线（新浪API）、港股/美股（yfinance兜底） |
-| `routes/nav.py` | 净值管理：出资方/转账记录/持仓快照/净值计算/赎回 |
 
 ### 3.2 核心层 (`backend/core/`)
 
@@ -60,64 +56,15 @@
 | `zhihu_analyzer.py` | LLM 分析知乎动态，提取看多/看空标的、关键观点、行动建议 |
 | `email_service.py` | SMTP 邮件发送（订阅通知 / 摘要 / 测试），记录发送日志 |
 
-### 3.4 量化交易引擎 (`backend/engine/`)
-
-事件驱动架构，所有组件通过 EventBus 通信。
-
-| 文件 | 职责 |
-|------|------|
-| `event_bus.py` | 内存 pub/sub，基于 isinstance 类型匹配，优先级排序 |
-| `events.py` | 10 种事件类型（Bar/Tick/Signal/Order/Fill/Position/Portfolio/Start/Stop/Timer） |
-| `clock.py` | 3 种时钟：RealClock（实盘）、ReplayClock（回测）、SimulationClock（模拟） |
-
-### 3.5 策略框架 (`backend/strategy/`)
-
-| 文件 | 职责 |
-|------|------|
-| `base.py` | 策略基类，生命周期：on_init → on_start → on_bar/on_tick/on_fill → on_stop |
-| `context.py` | 策略上下文，提供 buy/sell/get_position/get_history 等便捷方法 |
-| `registry.py` | @register 装饰器注册策略，按名称查询 |
-| `examples/ma_cross.py` | 均线交叉示例策略（快线上穿慢线买入，下穿卖出） |
-
-### 3.6 回测系统 (`backend/backtest/`)
-
-| 文件 | 职责 |
-|------|------|
-| `engine.py` | 事件驱动回测引擎：加载历史数据 → 重放 Bar → 策略触发 → 模拟成交 |
-| `metrics.py` | 绩效指标：总收益、年化收益、夏普比率、最大回撤、胜率、盈亏比 |
-
-### 3.7 执行层 (`backend/execution/`)
-
-| 文件 | 职责 |
-|------|------|
-| `order.py` | Order 状态机（CREATED → SUBMITTED → FILLED/REJECTED/CANCELLED） |
-| `broker.py` | AbstractBroker 接口定义 |
-| `paper_broker.py` | 模拟券商：市价/限价成交、滑点、佣金、部分成交 |
-
-### 3.8 组合管理 (`backend/portfolio/`)
-
-| 文件 | 职责 |
-|------|------|
-| `position.py` | Position 模型（加权平均成本、未实现盈亏） |
-| `manager.py` | PortfolioManager：监听 FillEvent，维护持仓/现金/盈亏 |
-
-### 3.9 风控 (`backend/risk/`)
-
-| 文件 | 职责 |
-|------|------|
-| `manager.py` | RiskManager：在订单执行前（priority=15）校验，黑名单模式 |
-| `rules.py` | 可组合规则：MaxPositionRule / OrderSizeRule / DailyLossLimitRule |
-
-### 3.10 数据层 (`backend/data/`)
+### 3.4 数据层 (`backend/data/`)
 
 | 文件 | 职责 |
 |------|------|
 | `bar.py` | Bar 数据结构（OHLCV） |
 | `provider.py` | DataProvider 抽象接口 |
-| `historical.py` | HistoricalDataProvider：从 AkShare 获取 A 股日线（前复权）+ SQLite 缓存 |
 | `intraday.py` | 30分钟K线数据：A股指数（新浪API）、港股/美股（yfinance兜底），支持 symbol/interval/days 参数 |
 
-### 3.11 任务层 (`backend/tasks/`)
+### 3.5 任务层 (`backend/tasks/`)
 
 | 文件 | 职责 |
 |------|------|
@@ -157,19 +104,17 @@
 /                 → LayoutView.vue (认证壳)
   /dashboard      → DashboardView.vue (嵌套子路由)
   /stocks         → StocksView.vue
+  /dividend-index → DividendIndexView.vue
   /scan/:taskId   → ScanProgressView.vue
   /sentiment      → SentimentView.vue
-  /strategies     → StrategiesView.vue
-  /backtest       → BacktestView.vue
-  /portfolio      → PortfolioView.vue
+  /vix            → VixView.vue
   /zhihu          → ZhihuMonitorView.vue
   /zhihu/timeline → ZhihuTimelineView.vue
-  /nav             → NAVManageView.vue
-  /nav/transfers   → TransferRecordView.vue
-  /nav/positions   → PositionSnapshotView.vue
+  /tasks          → TaskSchedulerView.vue
+  /financial-report → FinancialReportView.vue
 ```
 
-LayoutView 提供左侧边栏导航（分组：辅助交易/辅助功能/量化交易）+ 底部持久扫描进度条。**视觉规范（v2，2026-06-04）**：
+LayoutView 提供左侧边栏导航（分组：辅助交易/辅助功能/系统）+ 底部持久扫描进度条。**视觉规范（v2，2026-06-04）**：
 - 侧边栏：`--color-bg-glass` 半透明白底 + `backdrop-filter: blur(16px) saturate(180%)` 毛玻璃 + `--shadow-sidebar` 极淡分层阴影
 - 激活态：Vercel 风格 — 左侧 2px indigo 条 + `--color-accent-soft` 浅底 + `--color-accent-deep` 深文字
 - Logo：克制 indigo 单色渐变（#4f46e5 → #6366f1）+ 0 2px 8px rgba(79,70,229,0.32) 微光晕
@@ -211,7 +156,7 @@ dev 模式**单命令启动 + 热更新**：
 | 文件 | 页面 |
 |------|------|
 | `LoginView.vue` | 登录页，深色渐变背景，居中白色卡片 |
-| `LayoutView.vue` | 布局壳，左侧毛玻璃侧边栏（Vercel 风格激活条）+ 装饰渐变光晕背景 + sticky 底部扫描进度条；导航分组：辅助交易→仪表盘/全量扫描、辅助功能→舆情监控/知乎大V、量化交易→策略/回测/组合/净值管理 |
+| `LayoutView.vue` | 布局壳，左侧毛玻璃侧边栏（Vercel 风格激活条）+ 装饰渐变光晕背景 + sticky 底部扫描进度条；导航分组：辅助交易→仪表盘/全量扫描/红利指数、辅助功能→舆情监控/VIX/知乎大V/财报解析、系统→任务调度 |
 | `DashboardView.vue` | 仪表盘（**v2 视觉标杆页**）：渐变光晕背景 + 欢迎头部（icon/meta/管理员 chip + 实时时钟 + 脉冲状态点）+ 4 个 StatCard 横排（默认/强调/默认/动态盈亏色）+ ModernCard glass 装大盘指数 + ModernCard bordered 装高股息股票 + ModernCard 装任务日志 |
 | `DashboardView.vue` | 仪表盘：大盘指数卡片（实时） + TOP20 高股息表格 + 扫描任务日志 |
 | `StocksView.vue` | 全量扫描结果：服务端分页表格 + 搜索/筛选 + 股票详情弹窗 |
@@ -245,7 +190,7 @@ dev 模式**单命令启动 + 热更新**：
 
 ### 4.6 舆情监控因子化闭环（2026-06-29）
 
-舆情监控页不再只是手动列表页，而是“可观测的数据生产线”：目标是每天盘后稳定产出可被策略层消费的 `sentiment_scores` + `sentiment_indicators`，并把数据鲜度、调度健康、热点股票覆盖率直接暴露在页面顶部。
+舆情监控页不再只是手动列表页，而是“可观测的数据生产线”：目标是每天盘后稳定产出可被前端极端情绪看板消费的 `sentiment_scores` + `sentiment_indicators`，并把数据鲜度、调度健康、热点股票覆盖率直接暴露在页面顶部。
 
 **生产链路**：
 
@@ -305,15 +250,6 @@ dev 模式**单命令启动 + 热更新**：
 | GET | `/api/tasks/<task_id>/progress` | 任务进度 + 已扫描股票列表 | 是 |
 | GET | `/api/logs` | 扫描任务执行日志 | 是 |
 | GET | `/api/health` | 健康检查 | 否 |
-| GET | `/api/strategies` | 列出已注册策略类型 | 是 |
-| GET | `/api/strategies/<name>` | 策略详情（参数/标的） | 是 |
-| POST | `/api/backtest/run` | 运行回测（异步） | 是 |
-| GET | `/api/backtest/runs` | 历史回测记录列表 | 是 |
-| GET | `/api/backtest/runs/<id>` | 回测详情 + 交易明细 | 是 |
-| GET | `/api/quant/portfolio` | 组合快照 | 是 |
-| GET | `/api/quant/positions` | 持仓列表 | 是 |
-| GET | `/api/quant/snapshots` | 组合净值历史 | 是 |
-| GET | `/api/quant/risk/rules` | 风控规则参考 | 是 |
 | GET | `/api/sentiment/filters` | 获取舆情帖子过滤规则白名单 | 是 |
 | POST | `/api/sentiment/filters` | 新增过滤规则 | 是 |
 | DELETE | `/api/sentiment/filters/<id>` | 删除过滤规则 | 是 |
@@ -2358,7 +2294,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 ## 14. 舆情监控 v3 算法升级（2026-06-06）
 
-**目标**：在保留 v1/v2 已有能力（标题审计、熔断降级）的基础上，把舆情模块从"LLM 算 score 的黑盒"升级成"LLM 只打标 + Python 算 score + 时序因子 + 极端情绪信号 + 热门股池 + 策略层接口"的完整量化因子系统。
+**目标**：在保留 v1/v2 已有能力（标题审计、熔断降级）的基础上，把舆情模块从"LLM 算 score 的黑盒"升级成"LLM 只打标 + Python 算 score + 时序因子 + 极端情绪信号 + 热门股池"的完整量化因子系统。
 
 ### 14.1 设计动机
 
@@ -2366,13 +2302,12 @@ v2 的核心问题：
 1. **LLM 心算 13,707 字**：让模型算 `bullish/(bullish+bearish)×100`，MiniMax-M3 输出 13K 字 thinking 链，110s/只
 2. **错误信息撒谎**：`/api/sentiment/analyze` 失败时一律返回 500 + "API Key 或网络"，与真实原因（熔断/无帖子）不符
 3. **无时序视角**：每天的 score 独立保存，捕捉不到"连续 3 天恐慌爆发"这种**最重要的信号**
-4. **策略层不连通**：舆情数据没出口到量化策略，停留在"看一眼"
 
 v3 的解法：
 - **math 外移**：LLM 只输出 `[{id, label}]` 数组，score / sentiment 全部 Python 算
 - **精细化错误**：5 种失败原因 → 不同 HTTP 状态码（503 vs 500）+ 准确文案
 - **时序聚合**：EMA3/5、panic 2σ、euphoria 2σ、momentum cross
-- **策略接口**：`StrategyContext.get_sentiment_indicator()` + `sentiment_contrarian` 示例策略
+- **极端情绪看板**：panic/euphoria 信号经 `get_latest_signals` 暴露到前端「今日极端情绪」面板
 - **热门股池**：每日 16:05 自动从东财拉成交额 top 100 写入 sentiment_top_picks
 
 ### 14.2 4 分类标签体系
@@ -2591,45 +2526,6 @@ CREATE TABLE sentiment_indicators (
 );
 ```
 
-### 14.9 策略层接入
-
-#### 14.9.1 接口：StrategyContext.get_sentiment_indicator
-
-```python
-# 在策略里：
-ind = self.get_sentiment_indicator(symbol, days=1)
-# ind = {
-#   "date": "2026-06-06",
-#   "score": 25.0,
-#   "ema3": 30.5, "ema5": 42.1,
-#   "panic_signal": 1,           # ← 关键信号
-#   "euphoria_signal": 0,
-#   "momentum_cross": 0,
-#   ...
-# }
-```
-
-#### 14.9.2 示例策略：sentiment_contrarian
-
-A 股散户舆情**反向指标**策略：
-- `panic_signal=1` → 买入（买在无人问津处）
-- `euphoria_signal=1` → 卖出（卖在情绪高点）
-- 持仓超过 `max_hold_days=10` → 强制平仓
-- `cooldown_days=3`：同一标的两次信号间隔至少 3 天（防抖）
-
-**回测注意**：A 股必须扣除印花税（0.1% 卖出）+ 过户费（0.001%）+ 双边佣金（0.025%）+ 0.1% 滑点。
-
-#### 14.9.3 与现有 ma_cross 策略对比
-
-| 维度 | ma_cross | sentiment_contrarian |
-|------|----------|---------------------|
-| 数据源 | K线价格 | 舆情时序因子 |
-| 信号类型 | 趋势跟随 | 反向套利（情绪极值） |
-| 频率 | 日线 | 日线（指标按日更新） |
-| 假设 | 趋势延续 | 情绪回归 |
-
-两个策略**互补**，可同时跑：ma_cross 吃趋势，sentiment_contrarian 吃情绪回归。
-
 ### 14.10 热门股自动发现
 
 **v3 新增能力**：自动追踪"全市场成交额 top 100"，让用户看到每天资金扎堆在哪里。
@@ -2665,8 +2561,6 @@ A 股散户舆情**反向指标**策略：
 | `sentiment_indicators_service.py` 全市场重算 | `backend/services/sentiment_indicators_service.py` | ✅ |
 | `top_picks_service.py` 热门股池 | `backend/services/top_picks_service.py` | ✅ |
 | Scheduler hooks（16:05 / 16:35） | `backend/services/scheduler.py` | ✅ |
-| `sentiment_contrarian` 示例策略 | `backend/strategy/examples/sentiment_contrarian.py` | ✅ |
-| `StrategyContext.get_sentiment_indicator` | `backend/strategy/context.py:122-141` | ✅ |
 | 前端：极端情绪徽章 + 看板 + 热门股面板 | `frontend/src/views/SentimentView.vue` | ✅ |
 | 前端 API | `frontend/src/api/index.js:166-177` | ✅ |
 
@@ -2692,11 +2586,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:5000/api/sentiment/top_p
 # 4. 手动重算 indicators
 curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:5000/api/sentiment/indicators/recompute
 
-# 5. 验证策略已注册
-curl -H "Authorization: Bearer $TOKEN" http://localhost:5000/api/strategies
-# 预期：包含 ma_cross + sentiment_contrarian
-
-# 6. 看时序趋势图数据
+# 5. 看时序趋势图数据
 curl -H "Authorization: Bearer $TOKEN" "http://localhost:5000/api/sentiment/indicators?code=000001&days=30"
 ```
 
@@ -3538,7 +3428,6 @@ scan_index / scan_full / backtest / sentiment_batch / sentiment_single / sentime
 | `batch_analyze` (ThreadPoolExecutor) | 接受 `task_runner`；保留 `_BATCH_STATE` 写作为兼容层 |
 | `run_universe_crawl` (ThreadPoolExecutor) | 接受 `task_runner`；保留 `_UNIVERSE_BATCH_STATE` 写作为兼容层 |
 | `scan_dividend_index` / `scan_all_a_shares` | 接受 `task_runner`；scan_tasks 旧路径保留 |
-| `backtest.run` | 接受 `task_runner`；backtest_runs 旧路径保留 |
 
 #### 17.8.3 P2 — APScheduler 9 个定时任务
 
@@ -3561,7 +3450,6 @@ scan_index / scan_full / backtest / sentiment_batch / sentiment_single / sentime
 | POST | `/api/sentiment/universe/run/<idx>` | 返回 `task_id` |
 | POST | `/api/index_scan` | 返回 `task_id` |
 | POST | `/api/full_refresh` | 返回 `task_id` |
-| POST | `/api/backtest/run` | 返回 `run_id` + `task_id` |
 
 #### 17.8.5 弃用端点
 
@@ -3682,7 +3570,9 @@ extreme + normal 共享同一 `markers` 数组，但渲染时分流——前端�
 
 全项目审查发现的鉴权漏洞集中修复，均已在 `backend/api/` 落地并经 test_client 验证（无 token / `Bearer fake-token` → 401；合法 JWT → 200）。
 
-### 99.1 nav.py 假鉴权修复
+### 99.1 nav.py 假鉴权修复（净值模块已整体移除）
+
+> 注：净值管理（nav）模块因未接入实盘已整体删除，本条仅作历史安全记录保留。
 
 **问题**：`backend/api/routes/nav.py` 原本地重写了 `login_required` 装饰器，仅检查 `Authorization` 头是否以 `"Bearer "` 开头，**不校验 JWT 签名/过期**。`Bearer anything` 即可放行，净值模块全部写端点（转账/持仓/出金确认/参与方初始化）形同裸奔。
 

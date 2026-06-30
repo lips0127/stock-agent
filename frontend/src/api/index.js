@@ -103,34 +103,6 @@ export const getSentimentPost = (postId) =>
 export const refreshSentimentPostContent = (postId) =>
   api.post(`/sentiment/posts/${postId}/refresh_content`)
 
-// 量化交易系统
-export const getStrategies = () => api.get('/strategies')
-export const getStrategy = (name) => api.get(`/strategies/${name}`)
-
-export const runBacktest = (config) => api.post('/backtest/run', config)
-export const getBacktestRuns = (limit) => api.get('/backtest/runs', { params: { limit } })
-export const getBacktestRun = (id) => api.get(`/backtest/runs/${id}`)
-
-export const getPortfolio = () => api.get('/quant/portfolio')
-export const getPositions = () => api.get('/quant/positions')
-export const getSnapshots = () => api.get('/quant/snapshots')
-export const getRiskRules = () => api.get('/quant/risk/rules')
-
-// 净值管理系统
-export const getNavParties = () => api.get('/nav/parties')
-export const initNavParties = (data) => api.post('/nav/parties/init', data)
-export const getNavTransfers = (params) => api.get('/nav/transfers', { params })
-export const addNavTransfer = (data) => api.post('/nav/transfers', data)
-export const deleteNavTransfer = (id) => api.delete(`/nav/transfers/${id}`)
-export const calculateNav = (data) => api.post('/nav/calculate', data)
-export const getCurrentNav = () => api.get('/nav/current')
-export const getNavHistory = () => api.get('/nav/history')
-export const getNavPositions = (date) => api.get('/nav/positions', { params: { date } })
-export const addNavPosition = (data) => api.post('/nav/positions', data)
-export const getNavPositionDates = () => api.get('/nav/positions/dates')
-export const previewWithdraw = (data) => api.post('/nav/withdraw/preview', data)
-export const confirmWithdraw = (data) => api.post('/nav/withdraw/confirm', data)
-
 // 知乎大V监控
 export const getZhihuUsers = () => api.get('/zhihu/users')
 export const addZhihuUser = (url) => api.post('/zhihu/users', { url })

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-量化交易系统 — 个人量化工具，集股息率监控、策略回测、事件驱动交易框架于一体。
+量化工具 — 个人量化系统，集股息率监控、舆情/VIX 情绪分析、财报解析于一体。
 
 ## 架构（极简版）
 
@@ -20,11 +20,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **API & 核心**
 - `api/app.py` — Flask 应用入口
-- `api/routes/` — API 路由（auth, market, ops, sentiment, strategies, backtest, quant）
+- `api/routes/` — API 路由（auth, market, ops, sentiment, zhihu, vix, vix2, intraday, financial, scheduler, tasks, stock_dashboard）
 - `api/routes/tasks.py` — 统一任务 API（6 个端点：列表/详情/日志/取消/活跃/最近）**【Phase A, 2026-06-10】**
-- `core/database.py` — SQLite 数据库操作（17 张表，含新增 task_runs / task_run_logs）
+- `core/database.py` — SQLite 数据库操作（task_runs / task_run_logs 等表）
 - `core/task_runner.py` — 统一任务执行器（TaskRunner 上下文管理器）**【Phase A, 2026-06-10】**
-- `core/task_kinds.py` — 任务类型注册表（18 种 kind 枚举）**【Phase A, 2026-06-10】**
+- `core/task_kinds.py` — 任务类型注册表（kind 枚举）**【Phase A, 2026-06-10】**
 - `core/logging_config.py` — 日志配置（RotatingFileHandler + task_id 注入 + 噪声压制）
 
 **数据 & 服务**
@@ -33,26 +33,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `services/scheduler.py` — APScheduler 定时任务（工作日 15:30）
 - `services/forum_service.py` — 东财股吧爬虫
 - `services/sentiment_service.py` — LLM 情绪分析（LangChain）
+- `services/vix_service.py` / `vix2_service.py` — VIX 恐慌指数 + VIX2.0 ML 情绪回归
+- `services/zhihu_service.py` / `zhihu_analyzer.py` — 知乎大V抓取与 LLM 分析
+- `services/financial_service.py` — 财报 PDF 解析
 - `tasks/market_scan.py` — 扫描脚本
-
-**量化交易骨架（Phase 1 完成）**
-- `engine/event_bus.py` — 事件总线（内存 pub/sub）
-- `engine/events.py` — 10 种事件类型
-- `engine/clock.py` — 3 种时钟（Real/Replay/Simulation）
-- `strategy/base.py` — 策略基类（on_bar/on_tick/buy/sell）
-- `strategy/context.py` — 策略上下文（下单/查持仓/查历史）
-- `strategy/registry.py` — 策略注册表（@register 装饰器）
-- `strategy/examples/ma_cross.py` — 均线交叉示例策略
-- `data/` — Bar 结构 + DataProvider 抽象 + 历史数据(akshare+DB)
-- `execution/` — Order 状态机 + AbstractBroker 接口 + PaperBroker
-- `portfolio/` — Position 模型 + PortfolioManager
-- `risk/` — RiskManager + 风控规则
-- `backtest/engine.py` — 回测引擎（事件驱动重放）
-- `backtest/metrics.py` — 绩效指标（夏普/回撤/胜率）
 
 ### 前端 (`frontend/`)
 - Vue 3 + Element Plus + Pinia + Vue Router 单页应用
-- 页面：仪表盘、全量扫描、舆情监控、策略管理、回测、组合管理
+- 页面：仪表盘、全量扫描、红利指数、舆情监控、VIX、知乎大V、财报解析、任务调度
 - 调用 `/api/` 获取数据，生产环境由 Nginx 托管 dist/
 
 ## 启动方式
@@ -85,7 +73,7 @@ python -m backend.tasks.market_scan
 
 SQLite 文件：`stocks.db`（或 docker-compose 里的 `/data/stocks.db`）
 
-表结构（17 张表）：
+表结构：
 - `py_users` — 用户账户
 - `stock_daily_metrics` — 每日股票指标
 - `market_indices` — 大盘指数
@@ -95,14 +83,12 @@ SQLite 文件：`stocks.db`（或 docker-compose 里的 `/data/stocks.db`）
 - `sentiment_config` — 舆情监控配置
 - `forum_posts` — 股吧帖子缓存
 - `sentiment_scores` — LLM 情绪评分
-- `strategies` — 量化策略定义
-- `historical_bars` — 历史K线缓存
-- `signals` — 交易信号记录
-- `orders` — 订单记录
-- `positions` — 持仓记录
-- `portfolio_snapshots` — 组合快照
-- `backtest_runs` — 回测运行记录
-- `backtest_trades` — 回测交易明细
+- `sentiment_post_labels` / `sentiment_indicators` / `sentiment_top_picks` / `sentiment_filters` — 舆情因子生产线
+- `sentiment_universe_*` — 全市场舆情观测台
+- `zhihu_users` / `zhihu_posts` / `zhihu_analyses` / `zhihu_email_*` / `zhihu_smtp_settings` — 知乎大V监控
+- `vix_history` — VIX 历史
+- `scheduler_task_config` / `scheduler_task_run` — 调度配置与运行记录
+- `financial_reports_cache` — 财报解析缓存
 
 ## 核心 API
 
@@ -118,13 +104,6 @@ SQLite 文件：`stocks.db`（或 docker-compose 里的 `/data/stocks.db`）
 | GET | `/api/logs` | 任务执行日志 |
 | POST | `/api/auth/login` | 登录 |
 | GET | `/api/health` | 健康检查 |
-| GET | `/api/strategies` | 列出已注册策略类型 |
-| POST | `/api/backtest/run` | 运行回测（异步） |
-| GET | `/api/backtest/runs` | 历史回测记录 |
-| GET | `/api/backtest/runs/<id>` | 回测详情 + 交易明细 |
-| GET | `/api/quant/portfolio` | 组合快照 |
-| GET | `/api/quant/positions` | 持仓列表 |
-| GET | `/api/quant/risk/rules` | 风控规则参考 |
 | GET | `/api/tasks` | 任务列表（?kind=&status=&limit=） |
 | GET | `/api/tasks/active` | 当前运行中的任务 |
 | GET | `/api/tasks/recent` | 最近完成的任务 |
