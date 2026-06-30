@@ -18,3 +18,18 @@ node_modules/
 stock_names.json
 .idea/
 MEMORY.md
+
+# 工具与临时产物
+.codex/
+.playwright-mcp/
+.worktrees/
+*.log
+
+# 截图与一次性测试脚本
+*.png
+test_pins.py
+vr-test.js
+
+# 生成的 ML 模型与运行时数据（训练产物，运行时自动生成）
+data/models/
+data/research/
