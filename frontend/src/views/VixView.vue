@@ -7,7 +7,7 @@
 
     <PageHeader
       title="VIX 恐慌指数"
-      subtitle="5 ETF 代表性加权合成 VIX + 宽基/成长拆分 + Z-Score 动态中心 + PCR + 现货位置"
+      subtitle="合成 VIX · 恐惧贪婪 · 市场情绪位置"
       size="lg"
     >
       <template #icon>
@@ -44,7 +44,7 @@
       </template>
     </PageHeader>
 
-    <!-- v5 主指标：合成 VIX / 综合位置 / 滚动百分位 / 恐惧贪婪 / 涨跌停比 -->
+    <!-- 概览 KPI -->
     <section class="kpi-grid">
       <StatCard
         label="合成 VIX"
@@ -65,7 +65,7 @@
         :value="vix && vix.composite_percentile != null ? vix.composite_percentile.toFixed(0) + '%' : '—'"
         icon="📊"
         :tone="percentileTone"
-        hint="近 252 日排位（v5 统一口径）"
+        hint="近 252 日排位"
       />
       <StatCard
         label="恐惧贪婪"
@@ -83,13 +83,13 @@
       />
     </section>
 
-    <!-- 数据质量提示 + 回填进度 -->
+    <!-- 数据质量 -->
     <div v-if="vix?.data_quality" class="quality-banner" :class="{ 'quality-banner--warn': vix.data_quality.missing > 0 }">
       <span class="quality-banner__icon">{{ vix.data_quality.missing > 0 ? '⚠️' : '✅' }}</span>
       <span class="quality-banner__text">
         数据完整度 <strong>{{ vix.data_quality.real }} / {{ vix.data_quality.total }}</strong>
-        <span class="quality-banner__detail">
-          缺失分量：<el-tag
+        <span class="quality-banner__detail" v-if="missingSignals.length">
+          缺失：<el-tag
             v-for="k in missingSignals"
             :key="k"
             type="warning"
@@ -99,9 +99,6 @@
           >{{ missingLabel(k) }}</el-tag>
         </span>
       </span>
-      <el-tag v-if="vix.vix_source && vix.vix_source !== 'multi_etf'" type="warning" size="small" effect="light">
-        VIX 主体回退：{{ vixSourceLabel }}
-      </el-tag>
     </div>
 
     <div v-if="backfillProgress" class="backfill-progress">
@@ -112,71 +109,163 @@
       />
       <span class="backfill-progress__text">
         回填进度：{{ backfillProgress.done }} / {{ backfillProgress.total }}
-        <span v-if="backfillProgress.skipped" class="text-muted">（跳过 {{ backfillProgress.skipped }}）</span>
-        <span v-if="backfillProgress.failed" class="text-warn">（失败 {{ backfillProgress.failed }}）</span>
       </span>
     </div>
 
-    <!-- 主趋势图 -->
+    <!-- 趋势图 -->
     <ModernCard
-      title="VIX + 恐惧贪婪 + 综合位置 + 百分位 趋势"
-      :description="`近 ${historyDays} 天 · 绝对值看阈值，敏感视图看离散度`"
+      title="VIX · 恐惧贪婪 · 综合位置 趋势"
+      :description="`近 ${historyDays} 天`"
       variant="bordered"
     >
       <VixTrendChart :history="history" :height="320" />
     </ModernCard>
 
-    <!-- v5 多 ETF 隐含波动率 -->
+    <!-- 市场情绪位置：v7.0 为主，v6.1 / VIX2 对照 -->
     <ModernCard
-      title="多 ETF 隐含波动率"
-      :description="`5 个 ETF 期权 QVIX 代表性加权 (50/300/500/创业板/科创 = 20/30/20/15/15%) · 当前 ${vix?.vix_etf_count ?? 0} 个有效`"
+      title="市场情绪位置"
+      description="恐惧贪婪 · 0=平静 100=极度恐惧"
       variant="bordered"
     >
-      <div class="etf-iv-grid">
-        <div v-for="etf in etfIvList" :key="etf.label" class="etf-iv-item">
-          <span class="etf-iv-label">{{ etf.label }}</span>
-          <div class="etf-iv-bar-wrap">
-            <div class="etf-iv-bar" :style="{ width: etf.pct + '%', background: etf.color }" />
+      <div v-if="!vix" class="factor-loading">数据加载中…</div>
+      <template v-else>
+        <div class="emotion-grid">
+          <div class="emotion-main" :class="`emotion-main--${v7Tone}`">
+            <span class="emotion-main__label">v7.0 真实情绪</span>
+            <strong class="emotion-main__value">{{ fmt(vix?.fear_truth_v7, 0) }}</strong>
+            <span class="emotion-main__regime">{{ regimeLabel }}</span>
           </div>
-          <span class="etf-iv-value">{{ etf.value != null ? etf.value.toFixed(2) : '—' }}</span>
+          <div class="emotion-side">
+            <div class="emotion-chip">
+              <span>v6.1 恐惧贪婪</span>
+              <strong>{{ fmt(vix?.fear_greed, 0) }}</strong>
+            </div>
+            <div class="emotion-chip">
+              <span>VIX 2.0 ML</span>
+              <strong>{{ vix2TruthPrediction ? fmt(vix2TruthPrediction.fear_truth_vix2, 0) : '—' }}</strong>
+            </div>
+          </div>
+        </div>
+        <div class="v7-components">
+          <div class="v7-comp">
+            <span>价格回撤</span><strong>{{ fmt(vix?.v7_components?.drawdown, 0) }}</strong>
+          </div>
+          <div class="v7-comp">
+            <span>跌停广度</span><strong>{{ vix?.v7_components?.breadth == null ? '缺' : fmt(vix?.v7_components?.breadth, 0) }}</strong>
+          </div>
+          <div class="v7-comp">
+            <span>IV 飙升</span><strong>{{ vix?.v7_components?.iv_surge == null ? '缺' : fmt(vix?.v7_components?.iv_surge, 0) }}</strong>
+          </div>
+          <div class="v7-comp">
+            <span>IV 水平</span><strong>{{ vix?.v7_components?.iv_level == null ? '缺' : fmt(vix?.v7_components?.iv_level, 0) }}</strong>
+          </div>
+        </div>
+      </template>
+    </ModernCard>
+
+    <!-- VIX 2.0（机器学习）：只展示读数与操作，研究细节折叠 -->
+    <ModernCard
+      title="VIX 2.0（机器学习）"
+      description="ML 学习因子权重 · 仅作研究观察"
+      variant="bordered"
+    >
+      <template #actions>
+        <el-button size="small" :icon="MagicStick" @click="handleTrainVix2" :loading="vix2Training">
+          重新训练
+        </el-button>
+        <el-button size="small" :icon="Histogram" @click="handleBackfillVix2" :loading="vix2Backfilling">
+          回填
+        </el-button>
+      </template>
+
+      <div class="vix2-slim">
+        <div class="vix2-slim__main">
+          <span>重定向版情绪读数</span>
+          <strong>{{ vix2TruthPrediction ? fmt(vix2TruthPrediction.fear_truth_vix2, 0) : '—' }}</strong>
+          <em>0=平静 · 100=极恐</em>
+        </div>
+        <div class="vix2-slim__stats" v-if="vix2Latest">
+          <span>旧版 score {{ vix2Latest.score != null ? vix2Latest.score.toFixed(1) : '—' }}</span>
+          <span>P(上) {{ vix2Latest.p_up != null ? (vix2Latest.p_up * 100).toFixed(0) + '%' : '—' }}</span>
+          <span>百分位 {{ vix2Latest.percentile != null ? vix2Latest.percentile.toFixed(0) + '%' : '—' }}</span>
+        </div>
+      </div>
+
+      <el-collapse v-if="vix2Model?.trained" class="vix2-research-details">
+        <el-collapse-item title="模型与因子权重" name="details">
+          <div class="vix2-modelinfo vix2-modelinfo--inline">
+            <div><span>模型</span> {{ vix2Model.model_version }}</div>
+            <div><span>OOS-AUC</span> {{ vix2Model.oos_auc != null ? vix2Model.oos_auc.toFixed(3) : '—' }}</div>
+            <div><span>样本</span> {{ vix2Model.n_samples }}</div>
+          </div>
+          <div class="vix2-weights">
+            <div v-for="w in vix2Weights" :key="w.name" class="vix2-weight-row">
+              <span class="vix2-weight-name">{{ w.label }}</span>
+              <div class="vix2-weight-track">
+                <div
+                  class="vix2-weight-bar"
+                  :class="w.value >= 0 ? 'vix2-weight-bar--pos' : 'vix2-weight-bar--neg'"
+                  :style="{ width: w.pct + '%', [w.value >= 0 ? 'left' : 'right']: '50%' }"
+                />
+                <div class="vix2-weight-axis" />
+              </div>
+              <span class="vix2-weight-val">{{ w.value >= 0 ? '+' : '' }}{{ w.value.toFixed(3) }}</span>
+            </div>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
+    </ModernCard>
+
+    <!-- 波动率风险预算：单行 -->
+    <ModernCard
+      v-if="volRisk && volRisk.status === 'ok'"
+      title="波动率风险预算"
+      description="未来 10/20 日实现波动率风险 · 仓位上限参考"
+      variant="bordered"
+    >
+      <div class="volrisk-row">
+        <div class="volrisk-cell" :class="`volrisk-cell--${volRiskLevel?.tone || 'info'}`">
+          <span>风险等级</span><strong>{{ volRiskLevel?.label || '—' }}</strong>
+        </div>
+        <div class="volrisk-cell">
+          <span>风险分数</span><strong>{{ volRiskScoreText }}</strong>
+        </div>
+        <div class="volrisk-cell">
+          <span>权益仓位上限</span><strong>{{ volRiskEquityMaxText }}</strong>
         </div>
       </div>
     </ModernCard>
 
-    <!-- v2 市场位置信号（v5 连续化） -->
+    <!-- 市场位置参考 -->
     <ModernCard
-      title="市场位置信号"
-      :description="`基于上证综指 ma60 偏离度 + 5/20 日动量 + 20 日新高比例`"
+      title="市场位置参考"
+      description="上证综指 ma60 偏离 + 动量 + 新高比例"
       variant="bordered"
     >
       <div class="spot-grid">
         <div class="spot-metric" :class="`spot-metric--${devTone}`">
-          <div class="spot-metric__label">ma60 偏离度</div>
+          <div class="spot-metric__label">ma60 偏离</div>
           <div class="spot-metric__value">
             {{ spotDevDisplay }}<span class="spot-metric__unit">%</span>
           </div>
-          <div class="spot-metric__hint">当前位置 vs 60 日均线</div>
         </div>
         <div class="spot-metric" :class="`spot-metric--${mom5Tone}`">
           <div class="spot-metric__label">5 日动量</div>
           <div class="spot-metric__value">
             {{ spotMom5Display }}<span class="spot-metric__unit">%</span>
           </div>
-          <div class="spot-metric__hint">短期趋势</div>
         </div>
         <div class="spot-metric" :class="`spot-metric--${mom20Tone}`">
           <div class="spot-metric__label">20 日动量</div>
           <div class="spot-metric__value">
             {{ spotMom20Display }}<span class="spot-metric__unit">%</span>
           </div>
-          <div class="spot-metric__hint">中期趋势</div>
         </div>
         <div class="spot-metric" :class="`spot-metric--${hi20Tone}`">
           <div class="spot-metric__label">20 日新高比例</div>
           <div class="spot-metric__value">
             {{ spotNewHighDisplay }}<span class="spot-metric__unit">×</span>
           </div>
-          <div class="spot-metric__hint">趋势强度 0-1</div>
         </div>
       </div>
       <div class="spot-verdict" :class="`spot-verdict--${verdictTone}`">
@@ -185,27 +274,30 @@
       </div>
     </ModernCard>
 
-    <!-- v5 分项明细：5 格（删除北向 + PCR 真实数据） -->
+    <!-- 分项明细 -->
     <div class="subgrid">
-      <ModernCard title="合成 VIX" description="5 ETF QVIX 代表性加权">
+      <ModernCard title="多 ETF 隐含波动率" :description="`${vix?.vix_etf_count ?? 0} 个有效 · 代表性加权`">
+        <div class="etf-iv-grid">
+          <div v-for="etf in etfIvList" :key="etf.label" class="etf-iv-item">
+            <span class="etf-iv-label">{{ etf.label }}</span>
+            <div class="etf-iv-bar-wrap">
+              <div class="etf-iv-bar" :style="{ width: etf.pct + '%', background: etf.color }" />
+            </div>
+            <span class="etf-iv-value">{{ etf.value != null ? etf.value.toFixed(2) : '—' }}</span>
+          </div>
+        </div>
+      </ModernCard>
+      <ModernCard title="合成 VIX 明细" description="Z-Score · 宽基/成长拆分">
         <div class="big-num">{{ fmt(vix?.vix, 2) }}</div>
         <div class="big-num__sub">
-          Z={{ vix?.vix_zscore != null ? vix.vix_zscore.toFixed(2) : '—' }}
-          · {{ vix?.vix_etf_count ?? 0 }} ETF
+          Z={{ fmt(vix?.vix_zscore, 2) }} · {{ vix?.vix_etf_count ?? 0 }} ETF
         </div>
         <div class="big-num__sub" v-if="vix?.vix_broad != null || vix?.vix_growth != null">
           宽基 <strong>{{ fmt(vix?.vix_broad, 1) }}</strong>
           · 成长 <strong>{{ fmt(vix?.vix_growth, 1) }}</strong>
-          <span v-if="vix?.vix_growth_premium != null">
-            · 溢价 <strong :class="vix.vix_growth_premium > 0 ? 'text-down' : 'text-up'">{{ fmtSpot(vix.vix_growth_premium, 1) }}</strong>
-          </span>
-        </div>
-        <div class="big-num__sub" v-if="vix?.vix_change_pct != null || vix?.vix_swing_pct != null">
-          日变化 <strong :class="vix?.vix_change_pct > 0 ? 'text-down' : 'text-up'">{{ fmtSpot(vix?.vix_change_pct, 1, '%') }}</strong>
-          · 冲击 {{ vix?.vix_swing_pct != null ? vix.vix_swing_pct.toFixed(1) + '%' : '—' }}
         </div>
       </ModernCard>
-      <ModernCard title="已实现波动率" description="Garman-Klass 估计">
+      <ModernCard title="已实现波动率" description="Garman-Klass 年化">
         <div class="big-num-row">
           <div>
             <div class="big-num-mini">{{ fmt(vix?.rv_hs300, 2) }}</div>
@@ -216,9 +308,8 @@
             <div class="big-num-mini-label">中证1000</div>
           </div>
         </div>
-        <div class="big-num__sub">% 年化</div>
       </ModernCard>
-      <ModernCard title="PCR (Put/Call)" description="上交所 50ETF 期权">
+      <ModernCard title="PCR" description="50ETF 期权">
         <div class="big-num-row">
           <div>
             <div class="big-num-mini">{{ fmt(vix?.pcr_volume, 2) }}</div>
@@ -229,11 +320,8 @@
             <div class="big-num-mini-label">持仓量</div>
           </div>
         </div>
-        <div class="big-num__sub">
-          call {{ vix?.pcr_call_volume ?? 0 }} / put {{ vix?.pcr_put_volume ?? 0 }}
-        </div>
       </ModernCard>
-      <ModernCard title="融资余额" description="上交所 + 深交所">
+      <ModernCard title="融资余额" description="沪深两市">
         <div class="big-num">
           {{ vix?.margin_balance != null ? (vix.margin_balance / 10000).toFixed(2) : '—' }}
         </div>
@@ -250,23 +338,69 @@
             <div class="big-num-mini-label">跌停</div>
           </div>
         </div>
-        <div class="big-num__sub">家</div>
       </ModernCard>
     </div>
 
-    <!-- v5 阈值参考表：基于百分位 -->
-    <ModernCard title="综合位置 阈值参考" description="regime 分级（基于近 252 日滚动百分位）">
+    <!-- 阈值参考 -->
+    <ModernCard title="综合位置 阈值参考" description="基于近 252 日滚动百分位" variant="bordered">
       <el-table :data="thresholdRows" stripe>
-        <el-table-column prop="range" label="百分位区间" width="120" />
-        <el-table-column prop="label" label="情绪" width="140" />
-        <el-table-column prop="color" label="信号" width="120">
+        <el-table-column prop="range" label="百分位" width="110" />
+        <el-table-column prop="label" label="情绪" width="120" />
+        <el-table-column prop="color" label="位置" width="110">
           <template #default="{ row }">
             <el-tag :type="row.tagType" size="small" effect="light">{{ row.color }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="strategy" label="策略含义" />
+        <el-table-column prop="strategy" label="含义" />
       </el-table>
     </ModernCard>
+
+    <!-- 历史事件研究（折叠） -->
+    <el-collapse class="research-collapse">
+      <el-collapse-item title="历史事件研究：恐慌/贪婪状态的未来收益统计" name="study">
+        <div v-if="factorStudyLoading" class="factor-loading">正在计算…</div>
+        <div v-else-if="!factorStudy || factorStudy.status !== 'ok'" class="factor-loading">
+          暂无足够历史数据。
+        </div>
+        <template v-else>
+          <div class="factor-summary-grid">
+            <div class="factor-summary-card factor-summary-card--current">
+              <span>当前状态</span>
+              <strong>{{ factorCurrentBucket }}</strong>
+              <p>综合位置百分位 {{ factorCurrentPct }}</p>
+            </div>
+            <div class="factor-summary-card">
+              <span>历史最优候选</span>
+              <strong>{{ factorBestRule }}</strong>
+              <p>20 日均值 {{ factorBest20dAvg }}</p>
+            </div>
+            <div class="factor-summary-card" :class="productionRules.length ? 'factor-summary-card--pass' : 'factor-summary-card--blocked'">
+              <span>可回测规则</span>
+              <strong>{{ productionRules.length }}</strong>
+              <p>{{ productionRules.length ? productionRules.join('、') : '暂无' }}</p>
+            </div>
+          </div>
+          <el-table :data="factorBucketRows" stripe class="factor-table">
+            <el-table-column prop="label" label="状态" width="110" />
+            <el-table-column prop="range" label="百分位" width="100" />
+            <el-table-column prop="n20" label="样本" width="80" />
+            <el-table-column label="20日均值" width="100">
+              <template #default="{ row }">
+                <span :class="row.avg20 > 0 ? 'text-up' : 'text-down'">{{ row.avg20 != null ? `${row.avg20 > 0 ? '+' : ''}${row.avg20}%` : '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="20日胜率" width="90">
+              <template #default="{ row }">{{ row.win20 != null ? `${row.win20}%` : '—' }}</template>
+            </el-table-column>
+            <el-table-column label="60日均值">
+              <template #default="{ row }">
+                <span :class="row.avg60 > 0 ? 'text-up' : 'text-down'">{{ row.avg60 != null ? `${row.avg60 > 0 ? '+' : ''}${row.avg60}%` : '—' }}</span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
+      </el-collapse-item>
+    </el-collapse>
 
     <EmptyHint
       v-if="!vix && !loading"
@@ -280,8 +414,11 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, RefreshRight, Histogram } from '@element-plus/icons-vue'
-import { getVix, getVixHistory, recomputeVix, backfillVix, getTask } from '../api'
+import { Refresh, RefreshRight, Histogram, MagicStick } from '@element-plus/icons-vue'
+import {
+  getVix, getVixHistory, recomputeVix, backfillVix, getTask, getVixFactorStudy, getVixVolRisk,
+  getVix2, getVix2Model, trainVix2, backfillVix2,
+} from '../api'
 
 import PageHeader from '../components/ui/PageHeader.vue'
 import ModernCard from '../components/ui/ModernCard.vue'
@@ -292,21 +429,179 @@ import VixTrendChart from '../components/VixTrendChart.vue'
 
 const vix = ref(null)
 const history = ref([])
-const historyDays = ref(60)
+const historyDays = ref(365)
 const loading = ref(false)
+const volRisk = ref(null)
+const factorStudy = ref(null)
+const factorStudyLoading = ref(false)
 const recomputing = ref(false)
 const backfilling = ref(false)
 const backfillDays = ref(90)
 const backfillProgress = ref(null)
-const dbDataDays = ref(0)   // 当前 DB 实际有多少天的数据
+const dbDataDays = ref(0)
 let pollTimer = null
 let backfillTimer = null
 
-// 根据 DB 实际数据范围动态生成下拉 label
+// ── VIX 2.0（机器学习）状态 ──
+const vix2Latest = ref(null)
+const vix2Model = ref(null)
+const vix2TruthPrediction = ref(null)
+const vix2Training = ref(false)
+const vix2Backfilling = ref(false)
+let vix2Timer = null
+
+const VIX2_FEATURE_LABELS = {
+  qvix_50: 'QVIX 水平', qvix_50_z: 'QVIX Z-Score', qvix_50_chg5: 'QVIX 5日变化',
+  rv_hs300: '沪深300 RV', rv_qvix_spread: '方差风险溢价', ma60_dev: 'ma60 偏离',
+  mom_20d: '20日动量', mom_60d: '60日动量', new_high_ratio: '20日新高比例',
+  drawdown_252: '距顶回撤', dist_low_252: '距底涨幅',
+}
+const vix2Weights = computed(() => {
+  const w = vix2Model.value?.weights
+  if (!w) return []
+  const entries = Object.entries(w)
+  const maxAbs = Math.max(...entries.map(([, v]) => Math.abs(v)), 1e-6)
+  return entries
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .map(([name, value]) => ({
+      name,
+      label: VIX2_FEATURE_LABELS[name] || name,
+      value,
+      pct: (Math.abs(value) / maxAbs) * 50,
+    }))
+})
+
+const factorCurrentBucket = computed(() => factorStudy.value?.current?.bucket_label || '暂无')
+const factorCurrentPct = computed(() => {
+  const v = factorStudy.value?.current?.composite_percentile
+  return v == null ? '—' : `${v.toFixed(1)}%`
+})
+const factorBestRule = computed(() => factorStudy.value?.summary?.best_long_rule || '暂无')
+const factorBest20dAvg = computed(() => {
+  const v = factorStudy.value?.summary?.best_long_20d_avg
+  return v == null ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`
+})
+const productionRules = computed(() => factorStudy.value?.summary?.production_ready_rules || [])
+const factorBucketRows = computed(() => {
+  const buckets = factorStudy.value?.buckets || []
+  return buckets.map((b) => ({
+    label: b.label,
+    range: b.range,
+    n20: b.metrics?.['20']?.n ?? 0,
+    avg20: b.metrics?.['20']?.avg_ret,
+    win20: b.metrics?.['20']?.win_rate,
+    avg60: b.metrics?.['60']?.avg_ret,
+  }))
+})
+
+const volRiskLatest = computed(() => volRisk.value?.latest || null)
+const volRiskScoreText = computed(() => {
+  const v = volRiskLatest.value?.score
+  return v == null ? '—' : v.toFixed(0)
+})
+const volRiskLevel = computed(() => volRiskLatest.value?.risk_level || null)
+const volRiskEquityMaxText = computed(() => {
+  const v = volRiskLevel.value?.suggested_equity_max
+  return v == null ? '—' : `${Math.round(v * 100)}%`
+})
+
+const v7Tone = computed(() => {
+  const v = vix.value?.fear_truth_v7
+  if (v == null) return 'info'
+  if (v >= 70) return 'danger'
+  if (v >= 45) return 'warning'
+  if (v <= 15) return 'success'
+  return 'info'
+})
+
+async function fetchVolRisk() {
+  try {
+    const { data } = await getVixVolRisk()
+    volRisk.value = data
+  } catch {
+    volRisk.value = null
+  }
+}
+
+async function fetchFactorStudy() {
+  factorStudyLoading.value = true
+  try {
+    const { data } = await getVixFactorStudy(365)
+    factorStudy.value = data
+  } catch {
+    factorStudy.value = null
+  } finally {
+    factorStudyLoading.value = false
+  }
+}
+
+async function fetchVix2() {
+  try {
+    const [{ data: latest }, { data: model }] = await Promise.all([getVix2(), getVix2Model()])
+    vix2Latest.value = latest?.latest || null
+    vix2Model.value = model || { trained: false }
+    vix2TruthPrediction.value = latest?.truth_prediction || null
+  } catch {
+    vix2Model.value = { trained: false }
+  }
+}
+
+function pollVix2Task(taskId, flagRef) {
+  if (vix2Timer) clearInterval(vix2Timer)
+  vix2Timer = setInterval(async () => {
+    try {
+      const { data: task } = await getTask(taskId)
+      if (['completed', 'failed', 'cancelled'].includes(task?.status)) {
+        clearInterval(vix2Timer); vix2Timer = null
+        flagRef.value = false
+        if (task.status === 'completed') ElMessage.success('VIX 2.0 任务完成')
+        else ElMessage.warning(`VIX 2.0 任务${task.status === 'failed' ? '失败' : '取消'}`)
+        await fetchVix2()
+      }
+    } catch {
+      clearInterval(vix2Timer); vix2Timer = null
+      flagRef.value = false
+    }
+  }, 2500)
+}
+
+async function handleTrainVix2() {
+  if (vix2Training.value) return
+  vix2Training.value = true
+  try {
+    const { data } = await trainVix2()
+    ElMessage.success('VIX 2.0 训练已提交')
+    if (data?.task_id) pollVix2Task(data.task_id, vix2Training)
+    else vix2Training.value = false
+  } catch (e) {
+    ElMessage.error('训练提交失败: ' + (e.response?.data?.error || e.message))
+    vix2Training.value = false
+  }
+}
+
+async function handleBackfillVix2() {
+  if (vix2Backfilling.value) return
+  vix2Backfilling.value = true
+  try {
+    const { data } = await backfillVix2(0, false)
+    ElMessage.success('VIX 2.0 回填已提交')
+    if (data?.task_id) pollVix2Task(data.task_id, vix2Backfilling)
+    else vix2Backfilling.value = false
+  } catch (e) {
+    if (e.response?.status === 409) ElMessage.warning(e.response?.data?.error || '已有任务在进行中')
+    else ElMessage.error('回填提交失败: ' + (e.response?.data?.error || e.message))
+    vix2Backfilling.value = false
+  }
+}
+
+// 窗口单位是「交易日」（后端 get_vix_history 按行 LIMIT）。允许 15 个交易日
+// 容差：节假日/周末导致的零头差额不应触发回填，避免每次加载都误判“数据不足”。
+const BACKFILL_TOLERANCE = 15
+
 const daysOptions = computed(() => {
   const db = dbDataDays.value
-  return [30, 60, 90, 120, 250, 360].map((d) => {
-    const enough = db >= d
+  return [60, 120, 250, 365].map((d) => {
+    const enough = db >= d - BACKFILL_TOLERANCE
     return {
       value: d,
       label: enough
@@ -317,8 +612,7 @@ const daysOptions = computed(() => {
 })
 
 async function onDaysChange(newDays) {
-  // 如果选了超出 DB 范围的窗口，自动触发回填
-  if (dbDataDays.value < newDays) {
+  if (dbDataDays.value < newDays - BACKFILL_TOLERANCE) {
     ElMessage.info(`DB 仅有 ${dbDataDays.value} 天数据，自动触发 ${newDays} 天回填`)
     backfillDays.value = newDays
     await handleBackfill()
@@ -336,16 +630,6 @@ const missingSignals = computed(() => {
 })
 function missingLabel(k) { return SIGNAL_LABELS[k] || k }
 
-const vixSourceLabel = computed(() => {
-  const m = {
-    multi_etf: '5 ETF 等权',
-    '50etf_only': '单 50ETF（其余 ETF 失败）',
-    rv_fallback: '已实现波动率',
-    none: '无数据',
-  }
-  return m[vix.value?.vix_source] || vix.value?.vix_source
-})
-
 const regimeLabel = computed(() => {
   if (!vix.value) return ''
   const map = {
@@ -356,7 +640,6 @@ const regimeLabel = computed(() => {
 })
 const regimeTagType = computed(() => {
   if (!vix.value) return 'info'
-  // v5: 贪婪=顶部风险 → danger/warning；恐慌=底部机会 → success
   const t = { extreme_greed: 'danger', greed: 'warning', neutral: 'info',
               fear: 'success', extreme_fear: 'success' }
   return t[vix.value.regime] || 'info'
@@ -393,10 +676,10 @@ const fgTone = computed(() => {
 const percentileTone = computed(() => {
   const p = vix.value?.composite_percentile
   if (p == null) return 'default'
-  if (p < 10) return 'up'           // 极度恐慌 → 底部机会
+  if (p < 10) return 'up'
   if (p < 30) return 'up-soft'
   if (p <= 70) return 'default'
-  if (p <= 90) return 'down-soft'   // 贪婪 → 顶部风险
+  if (p <= 90) return 'down-soft'
   return 'down'
 })
 
@@ -411,14 +694,14 @@ const limitTone = computed(() => {
 
 // v5 阈值参考表（基于 composite 滚动百分位）
 const thresholdRows = [
-  { range: '0-10%',   label: '极度恐慌',  color: '底部机会', tagType: 'success', strategy: '市场极度悲观，往往是中长期底部区域；分批布局' },
+  { range: '0-10%',   label: '极度恐慌',  color: '低位压力', tagType: 'success', strategy: '市场极度悲观，可能处于中长期低位区域；仅作为风险位置参考' },
   { range: '10-30%',  label: '恐慌',     color: '偏悲观',  tagType: 'success', strategy: '市场情绪偏弱，关注是否进入超跌区域' },
-  { range: '30-70%',  label: '中性',     color: '均衡',    tagType: 'info',    strategy: '正常交易区间，按策略信号执行' },
-  { range: '70-90%',  label: '贪婪',     color: '偏乐观',  tagType: 'warning', strategy: '市场情绪偏高，警惕冲顶风险，适度止盈' },
-  { range: '90-100%', label: '极度贪婪', color: '顶部风险', tagType: 'danger',  strategy: '市场情绪极度乐观，谨慎追高；建议减仓 / 收紧止损' },
+  { range: '30-70%',  label: '中性',     color: '均衡',    tagType: 'info',    strategy: '正常交易区间，仓位由独立策略决定' },
+  { range: '70-90%',  label: '贪婪',     color: '偏乐观',  tagType: 'warning', strategy: '市场情绪偏高，警惕冲顶风险，收紧风险预算' },
+  { range: '90-100%', label: '极度贪婪', color: '高位风险', tagType: 'danger',  strategy: '市场情绪极度乐观，谨慎追高；适合作为降低风险暴露的提示' },
 ]
 
-// ── v2 综合位置（VIX×40% + 现货×60%）────
+// ── 综合位置（VIX×40% + 现货×60%）────
 const compositeDisplay = computed(() => {
   const c = vix.value?.composite
   if (c?.score == null) return '—'
@@ -427,10 +710,10 @@ const compositeDisplay = computed(() => {
 const compositeTone = computed(() => {
   const s = vix.value?.composite?.score
   if (s == null) return 'default'
-  if (s < 25) return 'up'             // 极度恐慌 → 机会
+  if (s < 25) return 'up'
   if (s < 45) return 'up-soft'
   if (s < 55) return 'default'
-  if (s < 75) return 'down-soft'      // 贪婪 → 风险
+  if (s < 75) return 'down-soft'
   return 'down'
 })
 const compositeHint = computed(() => {
@@ -441,7 +724,7 @@ const compositeHint = computed(() => {
   return `VIX 类 ${fg} × 40% + 现货 ${spot} × 60%`
 })
 
-// ── v5 多 ETF IV 柱状条数据 ────
+// ── 多 ETF IV 柱状条数据 ────
 const etfIvList = computed(() => [
   { label: '50ETF',  value: vix.value?.iv_50etf,  pct: Math.min(100, ((vix.value?.iv_50etf  || 0) / 50) * 100), color: '#6366f1' },
   { label: '300ETF', value: vix.value?.iv_300etf, pct: Math.min(100, ((vix.value?.iv_300etf || 0) / 50) * 100), color: '#8b5cf6' },
@@ -450,7 +733,7 @@ const etfIvList = computed(() => [
   { label: '科创50', value: vix.value?.iv_kcb,    pct: Math.min(100, ((vix.value?.iv_kcb    || 0) / 50) * 100), color: '#ddd6fe' },
 ])
 
-// ── v2 现货位置 4 子信号 + 文案 ────
+// ── 现货位置 4 子信号 ────
 function fmtSpot(v, digits = 2, suffix = '') {
   if (v == null || Number.isNaN(v)) return '—'
   return (v >= 0 ? '+' : '') + Number(v).toFixed(digits) + suffix
@@ -502,12 +785,12 @@ const hi20Tone = computed(() => {
 })
 
 const VERDICT = {
-  extreme_fear: { tone: 'extreme-down', label: '极度恐慌 · 强烈买入信号', text: '现货超跌 + 期权 IV 飙升，是中长期分批布局的时机。' },
-  fear:         { tone: 'down',         label: '恐慌区间 · 谨慎观察',     text: '期权市场转悲观，关注是否进入超跌区域。' },
-  neutral:      { tone: 'neutral',      label: '中性震荡',                 text: '无明确方向，按策略信号执行。' },
-  greed:        { tone: 'up',           label: '贪婪区间 · 警惕风险',     text: '市场偏热，警惕冲顶风险，适度止盈。' },
-  extreme_greed:{ tone: 'extreme-up',   label: '极度贪婪 · 顶部风险',     text: '现货已显著偏离均线 + 期权 IV 上升，高位风险确认，建议减仓。' },
-  unknown:      { tone: 'muted',        label: '数据收集中',               text: '现货数据不足，等待 ma60 窗口形成。' },
+  extreme_fear: { tone: 'extreme-down', label: '极度恐慌 · 低位压力', text: '现货超跌 + 期权 IV 飙升，市场处于高压力低位区域。' },
+  fear:         { tone: 'down',         label: '恐慌区间 · 谨慎观察', text: '期权市场转悲观，关注是否进入超跌区域。' },
+  neutral:      { tone: 'neutral',      label: '中性震荡', text: '无明确方向，仓位由独立策略决定。' },
+  greed:        { tone: 'up',           label: '贪婪区间 · 警惕风险', text: '市场偏热，适合作为收紧风险预算的提示。' },
+  extreme_greed:{ tone: 'extreme-up',   label: '极度贪婪 · 高位风险', text: '现货显著偏离均线 + IV 上升，高位波动风险抬升。' },
+  unknown:      { tone: 'muted',        label: '数据收集中', text: '现货数据不足，等待 ma60 窗口形成。' },
 }
 const verdictLabel = computed(() => VERDICT[vix.value?.regime || 'unknown']?.label || VERDICT.unknown.label)
 const verdictText = computed(() => VERDICT[vix.value?.regime || 'unknown']?.text || VERDICT.unknown.text)
@@ -561,7 +844,7 @@ async function handleRecompute() {
           clearInterval(pollTimer)
           pollTimer = null
           recomputing.value = false
-          await Promise.all([fetchLatest(), fetchHistory()])
+          await Promise.all([fetchLatest(), fetchHistory(), fetchFactorStudy(), fetchVolRisk()])
         }
       } catch {
         clearInterval(pollTimer)
@@ -589,7 +872,7 @@ async function confirmBackfill() {
       },
     )
   } catch {
-    return  // 用户取消
+    return
   }
   await handleBackfill()
 }
@@ -623,7 +906,7 @@ async function handleBackfill() {
           backfillTimer = null
           backfilling.value = false
           setTimeout(() => { backfillProgress.value = null }, 3000)
-          await Promise.all([fetchLatest(), fetchHistory()])
+          await Promise.all([fetchLatest(), fetchHistory(), fetchFactorStudy(), fetchVolRisk()])
         }
       } catch {
         clearInterval(backfillTimer)
@@ -644,11 +927,11 @@ async function handleBackfill() {
 
 onMounted(async () => {
   await fetchLatest()
-  await fetchHistory()
-  // 如果 DB 数据不足以支撑当前窗口（默认 60 天），自动回填到 90 天
-  if (dbDataDays.value < historyDays.value) {
-    ElMessage.info(`DB 仅有 ${dbDataDays.value} 天数据，自动触发 90 天回填`)
-    backfillDays.value = 90
+  await Promise.all([fetchHistory(), fetchFactorStudy(), fetchVolRisk()])
+  fetchVix2()
+  if (dbDataDays.value < historyDays.value - BACKFILL_TOLERANCE) {
+    ElMessage.info(`DB 仅有 ${dbDataDays.value} 天数据，自动触发 ${historyDays.value} 天回填`)
+    backfillDays.value = historyDays.value
     await handleBackfill()
     await fetchHistory()
   }
@@ -656,6 +939,7 @@ onMounted(async () => {
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
   if (backfillTimer) clearInterval(backfillTimer)
+  if (vix2Timer) clearInterval(vix2Timer)
 })
 </script>
 
@@ -725,7 +1009,8 @@ onUnmounted(() => {
 .vix-page > .kpi-grid,
 .vix-page > .subgrid,
 .vix-page > .quality-banner,
-.vix-page > .backfill-progress {
+.vix-page > .backfill-progress,
+.vix-page > .research-collapse {
   margin-bottom: var(--space-6);
 }
 .vix-page > .modern-card:last-of-type {
@@ -819,8 +1104,6 @@ onUnmounted(() => {
   color: var(--color-text-tertiary);
   font-weight: var(--weight-medium);
 }
-.text-muted { color: var(--color-text-tertiary); margin-left: 6px; }
-.text-warn  { color: var(--color-down); margin-left: 6px; font-weight: var(--weight-semibold); }
 
 .big-num__sub {
   margin-top: 4px;
@@ -829,7 +1112,7 @@ onUnmounted(() => {
   font-weight: var(--weight-medium);
 }
 
-/* ── v5 多 ETF 隐含波动率柱状条 ── */
+/* ── 多 ETF 隐含波动率柱状条 ── */
 .etf-iv-grid {
   display: flex;
   flex-direction: column;
@@ -867,7 +1150,7 @@ onUnmounted(() => {
   text-align: right;
 }
 
-/* ── v2 市场位置信号卡片 ── */
+/* ── 市场位置信号 ── */
 .spot-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -903,11 +1186,6 @@ onUnmounted(() => {
   color: var(--color-text-tertiary);
   font-weight: var(--weight-medium);
   margin-left: 2px;
-}
-.spot-metric__hint {
-  font-size: 11px;
-  color: var(--color-text-tertiary);
-  margin-top: 2px;
 }
 .spot-metric--muted .spot-metric__value { color: var(--color-text-tertiary); }
 .spot-metric--neutral .spot-metric__value { color: var(--color-text-primary); }
@@ -952,14 +1230,309 @@ onUnmounted(() => {
 .spot-verdict--extreme-up { background: rgba(5, 150, 105, 0.10); border-color: rgba(5, 150, 105, 0.32); }
 .spot-verdict--extreme-up .spot-verdict__label { color: var(--color-down); }
 
+/* ── 市场情绪位置（v7.0 为主）── */
+.emotion-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr);
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+  align-items: stretch;
+}
+.emotion-main {
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: rgba(255, 255, 255, 0.74);
+  box-shadow: var(--shadow-xs);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  justify-content: center;
+}
+.emotion-main__label {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  font-weight: var(--weight-semibold);
+}
+.emotion-main__value {
+  font-size: 2.6rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.emotion-main__regime {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  font-weight: var(--weight-medium);
+}
+.emotion-main--danger { background: linear-gradient(135deg, rgba(239, 68, 68, 0.12), rgba(255, 255, 255, 0.78)); border-color: rgba(239, 68, 68, 0.24); }
+.emotion-main--warning { background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(255, 255, 255, 0.78)); border-color: rgba(245, 158, 11, 0.24); }
+.emotion-main--success { background: linear-gradient(135deg, rgba(5, 150, 105, 0.10), rgba(255, 255, 255, 0.78)); border-color: rgba(5, 150, 105, 0.22); }
+.emotion-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  justify-content: center;
+}
+.emotion-chip {
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-muted);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.emotion-chip span {
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+  font-weight: var(--weight-medium);
+}
+.emotion-chip strong {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.v7-components {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.v7-comp {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.v7-comp span {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+}
+.v7-comp strong {
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+
+/* ── VIX 2.0 精简卡 ── */
+.vix2-slim {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: var(--shadow-xs);
+}
+.vix2-slim__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vix2-slim__main span {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  font-weight: var(--weight-semibold);
+}
+.vix2-slim__main strong {
+  font-size: 2.2rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.vix2-slim__main em {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  font-style: normal;
+}
+.vix2-slim__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.vix2-slim__stats span {
+  padding: 7px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  background: var(--color-bg-muted);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+}
+.vix2-research-details {
+  border-top: 1px solid var(--color-border);
+  margin-top: var(--space-3);
+}
+.vix2-modelinfo {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  line-height: 1.7;
+}
+.vix2-modelinfo--inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin-bottom: var(--space-4);
+  text-align: left;
+}
+.vix2-modelinfo span {
+  color: var(--color-text-secondary);
+  font-weight: var(--weight-semibold);
+}
+.vix2-weight-row {
+  display: grid;
+  grid-template-columns: 110px 1fr 64px;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.vix2-weight-name {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--color-text-secondary);
+}
+.vix2-weight-track {
+  position: relative;
+  height: 12px;
+  background: var(--color-bg-muted);
+  border-radius: var(--radius-sm);
+}
+.vix2-weight-axis {
+  position: absolute;
+  left: 50%; top: -2px; bottom: -2px;
+  width: 1px;
+  background: var(--color-border-strong);
+}
+.vix2-weight-bar {
+  position: absolute;
+  top: 0; bottom: 0;
+  border-radius: var(--radius-sm);
+  transition: width 500ms var(--ease);
+}
+.vix2-weight-bar--pos { background: var(--color-up); }
+.vix2-weight-bar--neg { background: var(--color-down); }
+.vix2-weight-val {
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+  text-align: right;
+}
+
+/* ── 波动率风险预算 单行 ── */
+.volrisk-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+.volrisk-cell {
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.volrisk-cell span {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  font-weight: var(--weight-semibold);
+}
+.volrisk-cell strong {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.volrisk-cell--danger { background: linear-gradient(135deg, rgba(239, 68, 68, 0.10), rgba(255, 255, 255, 0.78)); border-color: rgba(239, 68, 68, 0.24); }
+.volrisk-cell--warning { background: linear-gradient(135deg, rgba(245, 158, 11, 0.10), rgba(255, 255, 255, 0.78)); border-color: rgba(245, 158, 11, 0.24); }
+.volrisk-cell--success { background: linear-gradient(135deg, rgba(5, 150, 105, 0.08), rgba(255, 255, 255, 0.78)); border-color: rgba(5, 150, 105, 0.22); }
+
+/* ── 历史事件研究 折叠 ── */
+.research-collapse {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-card);
+  padding: 0 var(--space-4);
+}
+.factor-loading {
+  padding: var(--space-6);
+  color: var(--color-text-tertiary);
+  text-align: center;
+}
+.factor-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+.factor-summary-card {
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: var(--shadow-xs);
+}
+.factor-summary-card span {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+}
+.factor-summary-card strong {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--color-text-primary);
+  font-size: 24px;
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.02em;
+}
+.factor-summary-card p {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.65;
+}
+.factor-summary-card--current {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.10), rgba(255, 255, 255, 0.78));
+  border-color: rgba(99, 102, 241, 0.22);
+}
+.factor-summary-card--pass {
+  background: rgba(5, 150, 105, 0.07);
+  border-color: rgba(5, 150, 105, 0.22);
+}
+.factor-summary-card--blocked {
+  background: rgba(245, 158, 11, 0.07);
+  border-color: rgba(245, 158, 11, 0.22);
+}
+.factor-table { margin-top: var(--space-2); }
+
 @media (max-width: 1024px) {
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
   .subgrid  { grid-template-columns: repeat(2, 1fr); }
   .spot-grid { grid-template-columns: repeat(2, 1fr); }
+  .emotion-grid { grid-template-columns: 1fr; }
+  .volrisk-row { grid-template-columns: 1fr; }
+  .factor-summary-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 640px) {
   .kpi-grid { grid-template-columns: 1fr; }
   .subgrid  { grid-template-columns: 1fr; }
   .spot-grid { grid-template-columns: 1fr; }
+  .v7-components { grid-template-columns: repeat(2, 1fr); }
+  .vix2-weight-row { grid-template-columns: 92px 1fr 56px; }
+  .factor-summary-card strong { font-size: 21px; }
 }
 </style>

@@ -12,8 +12,11 @@ from backend.services.vix_service import (
     get_latest_api, get_history_api, compute_and_store,
     backfill_vix_history,
 )
+from backend.services.vix_factor_study import run_vix_factor_study
+from backend.services.vix_vol_risk_service import get_vix_vol_risk_api
 from backend.core.database import get_vix_history_count, get_active_task_runs
 from backend.core.task_runner import TaskRunner
+from backend.api.middleware import login_required
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +24,14 @@ vix_bp = Blueprint("vix", __name__, url_prefix="/api/vix")
 
 
 @vix_bp.route("", methods=["GET"])
+@login_required
 def get_vix():
     """最新 VIX 快照。"""
     return jsonify(get_latest_api())
 
 
 @vix_bp.route("/history", methods=["GET"])
+@login_required
 def get_vix_history_route():
     """历史 VIX。query: days=60"""
     try:
@@ -42,7 +47,27 @@ def get_vix_history_route():
     })
 
 
+@vix_bp.route("/factor-study", methods=["GET"])
+@login_required
+def get_vix_factor_study_route():
+    """VIX/恐惧贪婪因子事件研究。query: days=365"""
+    try:
+        days = int(request.args.get("days", 365))
+    except (TypeError, ValueError):
+        days = 365
+    return jsonify(run_vix_factor_study(days))
+
+
+@vix_bp.route("/vol-risk", methods=["GET"])
+@login_required
+def get_vix_vol_risk_route():
+    """VIX 波动率风险预算因子（只读生产候选，不是买卖信号）。"""
+    force = request.args.get("force") in {"1", "true", "yes"}
+    return jsonify(get_vix_vol_risk_api(force=force))
+
+
 @vix_bp.route("/recompute", methods=["POST"])
+@login_required
 def recompute_vix():
     """手动触发 VIX 重算（异步，返回 task_run_id 供轮询）。"""
     active = get_active_task_runs()
@@ -74,6 +99,7 @@ def recompute_vix():
 
 
 @vix_bp.route("/recompute_status", methods=["GET"])
+@login_required
 def recompute_status():
     """[deprecated] 轮询重算状态。请改用 GET /api/tasks/<id>。"""
     return jsonify({
@@ -83,6 +109,7 @@ def recompute_status():
 
 
 @vix_bp.route("/backfill", methods=["POST"])
+@login_required
 def backfill_vix():
     """回填历史 VIX。body: {"days": 30, "skip_existing": false}。返回 task_run_id。"""
     body = request.get_json(silent=True) or {}
@@ -119,6 +146,7 @@ def backfill_vix():
 
 
 @vix_bp.route("/backfill_status", methods=["GET"])
+@login_required
 def backfill_status_route():
     """[deprecated] 轮询回填状态。请改用 GET /api/tasks/<id>。"""
     return jsonify({

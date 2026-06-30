@@ -114,28 +114,47 @@ function regimeForComposite(pct) {
   return '极度贪婪'
 }
 
+// 非交易日（周末）过滤：category 轴只渲染数组里的日期，混入周末行会
+// 既多出一个 x 槽、又因 vix_source 异常造成断线。绘图前先剔除。
+function isTradingDay(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00')
+  const wd = d.getDay()
+  return wd !== 0 && wd !== 6
+}
+
 function buildOption() {
-  const dates = props.history.map((d) => d.date)
-  // 仅把多 ETF 合成的 VIX 当作可信值；降级(单50ETF)/缺失显示为断线，不画假直线
-  const values = props.history.map((d) =>
-    d.vix != null && d.vix_source === 'multi_etf' ? d.vix : null)
-  const fg = props.history.map((d) => d.fear_greed)
-  const composite = props.history.map((d) => d.composite_score)
-  const percentile = props.history.map((d) => d.composite_percentile)
+  const rows = props.history.filter((d) => d && d.date && isTradingDay(d.date))
+  const dates = rows.map((d) => d.date)
+  // 合成 VIX：只要有数值就画，靠 connectNulls 跨越个别降级点保持曲线连续；
+  // 数据可信度由 data_quality 横幅 + tooltip 的 vix_source 体现，不再靠断线表达。
+  const values = rows.map((d) => (d.vix != null && Number.isFinite(d.vix) ? d.vix : null))
+  const fg = rows.map((d) => d.fear_greed)
+  const composite = rows.map((d) => d.composite_score)
+  const percentile = rows.map((d) => d.composite_percentile)
   const sensitive = viewMode.value === 'sensitive'
   const displayVix = sensitive ? robustPressure(values) : values
   const displayFg = sensitive ? stretchSeries(fg) : fg
   const displayComposite = sensitive ? stretchSeries(composite) : composite
   const displayPercentile = sensitive ? stretchSeries(percentile) : percentile
 
+  // 图例只列出当前确有数据的曲线，避免出现空图例项
+  const hasData = (arr) => arr.some((v) => v != null && Number.isFinite(v))
+  const legendData = [
+    hasData(displayVix) && 'VIX',
+    hasData(displayFg) && 'FG',
+    hasData(displayComposite) && 'Composite',
+    hasData(displayPercentile) && 'Percentile',
+  ].filter(Boolean)
+
   return {
     legend: {
-      data: ['VIX', 'FG', 'Composite', 'Percentile'],
+      data: legendData,
       top: 0,
-      right: 0,
+      left: 0,
       icon: 'circle',
       itemWidth: 8,
       itemHeight: 8,
+      itemGap: 12,
       textStyle: { color: '#71717a', fontSize: 11 },
     },
     grid: { left: 36, right: 36, top: 30, bottom: 28, containLabel: false },
@@ -154,7 +173,7 @@ function buildOption() {
         const rawFg = fg[idx]
         const rawComposite = composite[idx]
         const rawPct = percentile[idx]
-        const rawZ = props.history[idx]?.vix_zscore
+        const rawZ = rows[idx]?.vix_zscore
         const zText = rawZ != null ? ` (Z=${rawZ.toFixed(1)})` : ''
         const rawLine = sensitive
           ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid #f4f4f5;color:#71717a;font-size:11px;">
@@ -230,7 +249,7 @@ function buildOption() {
         data: displayVix,
         smooth: true,
         showSymbol: false,
-        connectNulls: false,
+        connectNulls: true,
         lineStyle: { width: 2, color: '#4f46e5' },
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [

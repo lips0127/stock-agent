@@ -48,6 +48,7 @@ from backend.data.vix_sources import (
     HS300_SYMBOL, ZZ1000_SYMBOL, SH_COMPOSITE_SYMBOL,
     get_spot_signals_for_date,
 )
+from backend.services.fear_greed_truth import truth_score_as_of
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +425,14 @@ class VixSnapshot:
     composite_score: Optional[float]
     composite_regime: Optional[str]
     composite_percentile: Optional[float]  # v5 新增：composite 滚动百分位
+    # v7.0 construct-truth 恐惧贪婪（2026-06-29，与 v6.1 并存）
+    fear_truth_v7: Optional[float] = None
+    fear_greed_v7: Optional[float] = None
+    comp_drawdown_v7: Optional[float] = None
+    comp_breadth_v7: Optional[float] = None
+    comp_iv_surge_v7: Optional[float] = None
+    comp_iv_level_v7: Optional[float] = None
+    regime_v7: Optional[str] = None
     # 现货位置
     spot_close: Optional[float] = None
     spot_ma60_dev: Optional[float] = None
@@ -460,6 +469,13 @@ class VixSnapshot:
             "composite_score": self.composite_score,
             "composite_regime": self.composite_regime,
             "composite_percentile": self.composite_percentile,
+            "fear_truth_v7": self.fear_truth_v7,
+            "fear_greed_v7": self.fear_greed_v7,
+            "comp_drawdown_v7": self.comp_drawdown_v7,
+            "comp_breadth_v7": self.comp_breadth_v7,
+            "comp_iv_surge_v7": self.comp_iv_surge_v7,
+            "comp_iv_level_v7": self.comp_iv_level_v7,
+            "regime_v7": self.regime_v7,
             "components_json": json.dumps(self.components, ensure_ascii=False, default=str),
             "spot_close": self.spot_close,
             "spot_ma60_dev": self.spot_ma60_dev,
@@ -520,12 +536,14 @@ def recompute_percentiles(window: int = 252) -> dict:
 
 
 def compute_today_snapshot(date_str: Optional[str] = None,
-                           require_multi: bool = False) -> Optional[VixSnapshot]:
+                           require_multi: bool = False,
+                           truth_series: Optional[pd.DataFrame] = None) -> Optional[VixSnapshot]:
     """计算并返回某日 VIX 快照（v6.1）。
 
     require_multi=True（回填用）：若 5 ETF 合成失败（只能拿到单 50ETF 或全缺），
     返回 None，让调用方跳过写库、保留旧值，避免降级值污染历史曲线。
     require_multi=False（实时用）：允许降级到单 50ETF，保证当日总有值可展示。
+    truth_series: 回填时可传入 build_truth_series() 的结果复用，避免逐日重拉长历史。
     """
     if not date_str:
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -679,6 +697,29 @@ def compute_today_snapshot(date_str: Optional[str] = None,
     )
     components["limit_score"] = limit_score
 
+    # ── 7.5) v7.0 construct-truth 恐惧贪婪（与真相同公式，v6.1 并存）──
+    # 价格回撤锚 + 体制门控 + IV 飙升 + 广度崩塌 + IV 水平门控。
+    # 用 live 涨跌停真实家数；缺失时广度分量降权。失败不阻断 v6.1 流程。
+    try:
+        ld_count = components.get("limit_down_count")
+        ld_arg = float(ld_count) if (components.get("limit_source") == "real" and ld_count is not None) else None
+        truth = truth_score_as_of(date_str, limit_down_count=ld_arg, cached=truth_series)
+    except Exception as e:
+        logger.warning(f"v7.0 truth 评分失败 {date_str}: {e}")
+        truth = None
+    if truth is not None:
+        components["fear_truth_v7"] = truth.get("fear_truth")
+        components["fear_greed_v7"] = truth.get("greed_v7")
+        components["comp_drawdown_v7"] = truth.get("comp_drawdown")
+        components["comp_breadth_v7"] = truth.get("comp_breadth")
+        components["comp_iv_surge_v7"] = truth.get("comp_iv_surge")
+        components["comp_iv_level_v7"] = truth.get("comp_iv_level")
+        components["regime_v7"] = truth.get("regime")
+    else:
+        components["fear_truth_v7"] = None
+        components["fear_greed_v7"] = None
+        components["regime_v7"] = None
+
     # ── 8) 恐惧贪婪综合指数 ──
     fg = compute_fear_greed(components)
 
@@ -731,6 +772,13 @@ def compute_today_snapshot(date_str: Optional[str] = None,
         composite_score=composite,
         composite_regime=composite_regime,
         composite_percentile=composite_pct,
+        fear_truth_v7=components.get("fear_truth_v7"),
+        fear_greed_v7=components.get("fear_greed_v7"),
+        comp_drawdown_v7=components.get("comp_drawdown_v7"),
+        comp_breadth_v7=components.get("comp_breadth_v7"),
+        comp_iv_surge_v7=components.get("comp_iv_surge_v7"),
+        comp_iv_level_v7=components.get("comp_iv_level_v7"),
+        regime_v7=components.get("regime_v7"),
         spot_close=spot.get("spot_close") if spot else None,
         spot_ma60_dev=spot.get("spot_ma60_dev") if spot else None,
         spot_mom_5d=spot.get("spot_mom_5d") if spot else None,
@@ -825,6 +873,14 @@ def backfill_vix_history(
         task_runner.set_total(len(candidates))
         task_runner.milestone(f"开始回填 {len(candidates)} 个交易日 VIX 快照")
 
+    # v7.0 truth 序列只建一次（全历史，trailing 窗口 point-in-time），逐日复用
+    truth_series = None
+    try:
+        from backend.services.fear_greed_truth import build_truth_series
+        truth_series = build_truth_series()
+    except Exception as e:
+        logger.warning(f"回填: truth 序列构建失败，v7.0 将缺失: {e}")
+
     for idx, d in enumerate(candidates):
         if task_runner is not None:
             task_runner.check_cancelled()
@@ -836,7 +892,7 @@ def backfill_vix_history(
                 task_runner.progress(idx + 1)
             continue
         try:
-            snap = compute_today_snapshot(d, require_multi=True)
+            snap = compute_today_snapshot(d, require_multi=True, truth_series=truth_series)
             if snap is None:
                 failed += 1
                 last_error = f"{d}: 多 ETF 合成失败（跳过，保留旧值）"
@@ -956,6 +1012,16 @@ def snapshot_to_api(snap_dict: dict) -> dict:
         # v5: regime = composite_regime（统一标签）
         "regime":              snap_dict.get("composite_regime"),
         "vix_only_regime":     snap_dict.get("regime"),  # 保留兼容
+        # v7.0: construct-truth 恐惧贪婪（与 v6.1 并存，同屏对比）
+        "fear_truth_v7":       snap_dict.get("fear_truth_v7"),
+        "fear_greed_v7":       snap_dict.get("fear_greed_v7"),
+        "regime_v7":           snap_dict.get("regime_v7"),
+        "v7_components": {
+            "drawdown":  snap_dict.get("comp_drawdown_v7"),
+            "breadth":   snap_dict.get("comp_breadth_v7"),
+            "iv_surge":  snap_dict.get("comp_iv_surge_v7"),
+            "iv_level":  snap_dict.get("comp_iv_level_v7"),
+        },
         # 百分位（基于 composite，不再基于 vix）
         "percentile":          snap_dict.get("composite_percentile"),
         # 现货位置
