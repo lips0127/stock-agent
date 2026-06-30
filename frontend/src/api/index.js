@@ -69,6 +69,7 @@ export const analyzeSentiment = (stock_code, forum_type = 'eastmoney') =>
 export const batchAnalyzeSentiment = () => api.post('/sentiment/batch_analyze')
 export const getBatchAnalyzeStatus = () => api.get('/sentiment/batch_analyze_status')
 export const getBatchAnalyzeCount = () => api.get('/sentiment/batch_analyze_count')
+export const getSentimentHealth = () => api.get('/sentiment/health')
 
 // 舆情帖子过滤规则
 export const getSentimentFilters = (filter_type) =>
@@ -135,7 +136,8 @@ export const getZhihuUsers = () => api.get('/zhihu/users')
 export const addZhihuUser = (url) => api.post('/zhihu/users', { url })
 export const deleteZhihuUser = (id) => api.delete(`/zhihu/users/${id}`)
 export const patchZhihuUser = (id, data) => api.patch(`/zhihu/users/${id}`, data)
-export const refreshZhihuUser = (id) => api.post(`/zhihu/users/${id}/refresh`)
+export const refreshZhihuUser = (id, opts = {}) =>
+  api.post(`/zhihu/users/${id}/refresh`, null, { params: opts })
 export const getZhihuRefreshStatus = (taskId) => api.get(`/zhihu/refresh_status/${taskId}`)
 export const analyzeRecentZhihuUser = (id, limit = 10) =>
   api.post(`/zhihu/users/${id}/analyze_recent`, null, { params: { limit } })
@@ -165,9 +167,19 @@ export const getMarketIntraday = (symbol, interval = '30min', days = 7) =>
 // 重算/回填为异步任务，返回 task_id；状态用 getTask(taskId) 轮询（旧 *_status 端点已 410）
 export const getVix = () => api.get('/vix')
 export const getVixHistory = (days = 60) => api.get('/vix/history', { params: { days } })
+export const getVixFactorStudy = (days = 365) => api.get('/vix/factor-study', { params: { days } })
+export const getVixVolRisk = () => api.get('/vix/vol-risk')
 export const recomputeVix = () => api.post('/vix/recompute')
 export const backfillVix = (days = 30, skip_existing = true) =>
   api.post('/vix/backfill', { days, skip_existing })
+
+// VIX 2.0（机器学习）— 与 v6.1 并行；train/backfill 异步返回 task_id
+export const getVix2 = () => api.get('/vix2')
+export const getVix2History = (days = 365) => api.get('/vix2/history', { params: { days } })
+export const getVix2Model = () => api.get('/vix2/model')
+export const trainVix2 = (params = {}) => api.post('/vix2/train', params)
+export const backfillVix2 = (days = 0, skip_existing = false) =>
+  api.post('/vix2/backfill', { days, skip_existing })
 
 // 舆情 v3 升级（2026-06-06）：时序因子 + 热门股池
 export const getSentimentIndicators = (code, days = 30) =>
@@ -178,8 +190,10 @@ export const recomputeSentimentIndicators = () =>
   api.post('/sentiment/indicators/recompute')
 export const getTopPicks = (date = null) =>
   api.get('/sentiment/top_picks', { params: date ? { date } : {} })
-export const refreshTopPicks = (top_n = 100, auto_add = false) =>
-  api.post('/sentiment/top_picks/refresh', { top_n, auto_add })
+export const refreshTopPicks = (top_n = 100, auto_add = false, analyze_limit = 0) =>
+  api.post('/sentiment/top_picks/refresh', { top_n, auto_add, analyze_limit })
+export const analyzeTopPicks = (limit = 20) =>
+  api.post('/sentiment/top_picks/analyze', { limit })
 
 // 财报解析
 export const parseFinancialReport = (text) =>

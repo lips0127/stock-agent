@@ -1,26 +1,26 @@
 <template>
   <div class="stocks-page">
-    <!-- 页面标题 -->
-    <div class="page-header">
-      <div class="page-header__left">
-        <h2 class="page-title">全量扫描结果</h2>
-        <span v-if="scanDate" class="scan-date">扫描日期：{{ scanDate }}</span>
-      </div>
-      <el-tag v-if="total > 0" type="info" effect="plain" size="large">
-        共 {{ total }} 只
-      </el-tag>
-    </div>
+    <PageHeader
+      title="全量扫描结果"
+      :subtitle="scanDate ? `扫描日期：${scanDate}` : '等待扫描结果'"
+    >
+      <template #actions>
+        <span v-if="total > 0" class="total-pill">共 {{ total }} 只</span>
+      </template>
+    </PageHeader>
 
-    <!-- 筛选栏 -->
-    <el-card shadow="never" class="filter-card">
+    <ModernCard>
       <div class="filter-bar">
         <el-input
           v-model="searchText"
           placeholder="搜索代码或名称"
           clearable
           style="width: 220px"
-          :prefix-icon="Search"
-        />
+        >
+          <template #prefix>
+            <el-icon><Search /></el-icon>
+          </template>
+        </el-input>
         <el-select v-model="yieldFilter" placeholder="股息率筛选" style="width: 140px" clearable>
           <el-option label="全部" value="" />
           <el-option label="> 3%" value="3" />
@@ -28,45 +28,41 @@
           <el-option label="> 7%" value="7" />
         </el-select>
       </div>
-    </el-card>
+    </ModernCard>
 
-    <!-- 数据表格 -->
-    <el-card shadow="never" class="table-card">
+    <ModernCard padded>
       <el-table
         :data="filteredStocks"
         v-loading="loading"
-        stripe
         highlight-current-row
-        style="width: 100%"
+        :empty-text="'暂无扫描数据'"
         @row-click="handleRowClick"
-        empty-text="暂无扫描数据"
       >
         <el-table-column type="index" label="#" width="60" :index="indexMethod" />
-        <el-table-column prop="code" label="代码" width="110">
+        <el-table-column prop="code" label="代码" width="120">
           <template #default="{ row }">
-            <span class="code-text">{{ row.code }}</span>
+            <span class="code-cell">{{ row.code }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="name" label="名称" min-width="140" />
-        <el-table-column prop="price" label="最新价" width="100" align="right" sortable>
+        <el-table-column prop="name" label="名称" min-width="160" />
+        <el-table-column prop="price" label="最新价" width="120" align="right" sortable>
           <template #default="{ row }">
-            {{ row.price != null ? Number(row.price).toFixed(2) : '--' }}
+            <span class="num">{{ row.price != null ? Number(row.price).toFixed(2) : '--' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="dividend_per_share" label="每股分红" width="100" align="right">
+        <el-table-column prop="dividend_per_share" label="每股分红" width="120" align="right">
           <template #default="{ row }">
-            {{ row.dividend_per_share != null ? Number(row.dividend_per_share).toFixed(4) : '--' }}
+            <span class="num">{{ row.dividend_per_share != null ? Number(row.dividend_per_share).toFixed(4) : '--' }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="dividend_yield" label="股息率" width="100" align="right" sortable>
+        <el-table-column prop="dividend_yield" label="股息率" width="140" align="right" sortable>
           <template #default="{ row }">
-            <el-tag
-              :type="row.dividend_yield >= 5 ? 'danger' : 'success'"
-              size="small"
-              effect="light"
+            <span
+              class="yield-pill"
+              :class="row.dividend_yield >= 5 ? 'yield-pill--high' : 'yield-pill--low'"
             >
               {{ row.dividend_yield != null ? Number(row.dividend_yield).toFixed(2) + '%' : '--' }}
-            </el-tag>
+            </span>
           </template>
         </el-table-column>
       </el-table>
@@ -82,7 +78,7 @@
           @size-change="handleSizeChange"
         />
       </div>
-    </el-card>
+    </ModernCard>
 
     <StockSearch v-model:visible="searchVisible" :symbol="searchSymbol" />
   </div>
@@ -93,6 +89,8 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useTaskStore } from '../stores/task'
 import { getAllStocks } from '../api'
 import { Search } from '@element-plus/icons-vue'
+import PageHeader from '../components/ui/PageHeader.vue'
+import ModernCard from '../components/ui/ModernCard.vue'
 import StockSearch from '../components/StockSearch.vue'
 
 const taskStore = useTaskStore()
@@ -170,55 +168,54 @@ onMounted(() => {
 .stocks-page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.page-header__left {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-}
-.page-title {
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--color-text-primary);
-}
-.scan-date {
-  font-size: 13px;
-  color: var(--color-text-muted);
-}
-.filter-card {
-  border-radius: var(--radius-card);
-}
-.filter-card :deep(.el-card__body) {
-  padding: 12px 20px;
+.total-pill {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  background: var(--color-bg-muted);
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  font-variant-numeric: tabular-nums;
 }
 .filter-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
+  flex-wrap: wrap;
 }
-.table-card {
-  border-radius: var(--radius-card);
+.code-cell {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  letter-spacing: 0.02em;
+  color: var(--color-text-primary);
+  font-weight: var(--weight-medium);
 }
-.table-card :deep(.el-card__body) {
-  padding: 0;
+.num {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--weight-medium);
 }
-.table-card :deep(.el-table) {
-  border-radius: var(--radius-card) var(--radius-card) 0 0;
+.yield-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: var(--radius-full);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
 }
-.code-text {
-  font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
-  font-size: 13px;
-  letter-spacing: 0.5px;
+.yield-pill--high {
+  background: var(--color-up-soft);
+  color: var(--color-up);
+}
+.yield-pill--low {
+  background: var(--color-success-soft);
+  color: var(--color-success);
 }
 .pagination-bar {
-  padding: 16px 20px;
+  padding: var(--space-4) var(--space-5);
   display: flex;
   justify-content: flex-end;
+  border-top: 1px solid var(--color-divider);
 }
 </style>

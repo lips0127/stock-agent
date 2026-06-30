@@ -1,32 +1,272 @@
 <template>
   <div class="dashboard">
-    <IndexCards :indices="indices" :loading="indicesLoading" />
-
-    <div class="stock-table-header">
-      <span class="section-title">高股息股票</span>
-      <el-button text size="small" type="primary" @click="router.push({ name: 'Stocks' })">
-        查看全量 →
-      </el-button>
+    <!-- 装饰性渐变光晕（背景层） -->
+    <div class="dashboard__ambient" aria-hidden="true">
+      <GradientBlob position="tr" size="lg" :intensity="0.85" />
+      <GradientBlob position="bl" size="md" :intensity="0.55" c1="#f0f9ff" c3="rgba(186, 230, 253, 0.4)" />
     </div>
-    <StockTable :stocks="stocks" :loading="stocksLoading" @search="openStockSearch" />
-    <StockSearch v-model:visible="searchVisible" :symbol="searchSymbol" />
 
-    <TaskLogs :logs="logs" :loading="logsLoading" />
+    <!-- 欢迎头部 -->
+    <PageHeader
+      :title="greeting"
+      :subtitle="`实时指数、高股息榜单与扫描任务日志 · 共 ${stocks.length} 只高股息标的`"
+      size="lg"
+    >
+      <template #icon>
+        <span class="welcome-glyph">📊</span>
+      </template>
+      <template #meta>
+        <span class="meta-item">
+          <span class="meta-dot" :class="{ 'meta-dot--pulse': !anyLoading }" />
+          数据已同步 · {{ lastSyncLabel }}
+        </span>
+        <span class="meta-divider" />
+        <span class="meta-item">
+          <el-icon class="meta-icon"><Clock /></el-icon>
+          {{ clockLabel }}
+        </span>
+        <span class="meta-divider" />
+        <span class="meta-item">
+          <span class="meta-tag">管理员</span>
+          {{ auth.username }}
+        </span>
+      </template>
+      <template #actions>
+        <el-button :icon="RefreshRight" @click="refreshAll" :loading="anyLoading" round>
+          刷新数据
+        </el-button>
+        <el-button type="primary" :icon="Search" @click="handleFullRefresh" :loading="fullRefreshing" round>
+          全市场扫描
+        </el-button>
+      </template>
+    </PageHeader>
+
+    <!-- 关键指标 -->
+    <section class="kpi-grid">
+      <StatCard
+        label="监控指数"
+        :value="indices.length"
+        icon="📈"
+        tone="default"
+        hint="覆盖上证/深证/创业板/科创50/沪深300"
+      >
+        <template #badge>
+          <el-tag v-if="indices.length" type="success" size="small" effect="light">实时</el-tag>
+        </template>
+      </StatCard>
+
+      <StatCard
+        label="高股息标的"
+        :value="stocks.length"
+        icon="💎"
+        tone="accent"
+        :hint="`按股息率倒序 TOP ${stocks.length}`"
+      />
+
+      <StatCard
+        label="今日任务"
+        :value="logs.length"
+        icon="🗂"
+        tone="default"
+        :hint="`最近 ${logs.length} 条扫描记录`"
+      >
+        <template #badge>
+          <el-tag v-if="runningTaskCount" type="warning" size="small" effect="light">
+            {{ runningTaskCount }} 运行中
+          </el-tag>
+        </template>
+      </StatCard>
+
+      <StatCard
+        label="组合总盈亏"
+        :value="formatPnl(totalPnl)"
+        icon="💰"
+        :tone="pnlTone"
+        :hint="pnlHint"
+      />
+    </section>
+
+    <!-- VIX 恐慌指数 + 恐惧贪婪 -->
+    <ModernCard
+      title="VIX 恐慌指数"
+      description="50ETF 期权隐含波动率 + 已实现波动率 + 情绪面合成"
+      variant="bordered"
+    >
+      <template #extra>
+        <el-button text type="primary" size="small" @click="router.push('/vix')">
+          详情
+          <el-icon class="el-icon--right"><ArrowRight /></el-icon>
+        </el-button>
+      </template>
+
+      <div v-if="vix" class="vix-row">
+        <VixGauge
+          :value="vix.composite_score"
+          :percentile="vix.composite_percentile"
+          :regime="vix.composite_regime"
+          :vix="vix.vix"
+          :vix-zscore="vix.vix_zscore"
+        />
+        <div class="vix-fg">
+          <div class="vix-fg__label">恐惧贪婪综合指数</div>
+          <div class="vix-fg__value">
+            <span class="vix-fg__num">{{ vix.fear_greed != null ? vix.fear_greed.toFixed(0) : '—' }}</span>
+            <span class="vix-fg__max">/ 100</span>
+          </div>
+          <div class="vix-fg__bar">
+            <div
+              class="vix-fg__fill"
+              :class="`vix-fg__fill--${fgBand}`"
+              :style="{ width: (vix.fear_greed || 0) + '%' }"
+            />
+            <div class="vix-fg__ticks">
+              <span style="left:25%">恐慌</span>
+              <span style="left:50%">中性</span>
+              <span style="left:75%">贪婪</span>
+            </div>
+          </div>
+          <div class="vix-subgrid">
+            <div class="vix-sub">
+              <div class="vix-sub__label">50ETF IV</div>
+              <div class="vix-sub__val">{{ fmt(vix.iv_50etf, 2) }}</div>
+            </div>
+            <div class="vix-sub">
+              <div class="vix-sub__label">RV 沪深300</div>
+              <div class="vix-sub__val">{{ fmt(vix.rv_hs300, 2) }}</div>
+            </div>
+            <div class="vix-sub">
+              <div class="vix-sub__label">RV 中证1000</div>
+              <div class="vix-sub__val">{{ fmt(vix.rv_zz1000, 2) }}</div>
+            </div>
+            <div class="vix-sub">
+              <div class="vix-sub__label">涨跌停比</div>
+              <div class="vix-sub__val">
+                <span class="text-up">{{ vix.limit_up_count || 0 }}</span>
+                <span class="vix-sub__sep">/</span>
+                <span class="text-down">{{ vix.limit_down_count || 0 }}</span>
+              </div>
+            </div>
+            <div class="vix-sub">
+              <div class="vix-sub__label">融资余额</div>
+              <div class="vix-sub__val">
+                {{ vix.margin_balance != null ? (vix.margin_balance / 10000).toFixed(2) + ' 万亿' : '—' }}
+              </div>
+            </div>
+            <div class="vix-sub">
+              <div class="vix-sub__label">PCR 成交量</div>
+              <div class="vix-sub__val">
+                {{ fmt(vix.pcr_volume, 2) }}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="vix-trend-wrap">
+          <VixTrendChart :history="vixHistory" />
+        </div>
+      </div>
+      <div v-if="vix && vix.data_quality" class="vix-quality">
+        <span class="vix-quality__icon">{{ vix.data_quality.missing > 0 ? '⚠️' : '✅' }}</span>
+        <span>数据完整度 <strong>{{ vix.data_quality.real }} / {{ vix.data_quality.total }}</strong> · 缺失：
+          <el-tag
+            v-for="k in dashboardMissingSignals"
+            :key="k"
+            type="warning" size="small" effect="light"
+            style="margin-left: 4px"
+          >{{ missingLabel(k) }}</el-tag>
+        </span>
+        <el-button text type="primary" size="small" @click="router.push('/vix')">
+          详情
+          <el-icon class="el-icon--right"><ArrowRight /></el-icon>
+        </el-button>
+      </div>
+      <EmptyHint
+        v-else
+        title="暂无 VIX 数据"
+        description="可点击下方按钮手动触发计算"
+        carded
+      >
+        <template #action>
+          <el-button :icon="Refresh" type="primary" round :loading="vixRecomputing" @click="handleRecomputeVix">
+            立即计算 VIX
+          </el-button>
+        </template>
+      </EmptyHint>
+    </ModernCard>
+
+    <!-- 大盘指数 -->
+    <ModernCard
+      title="大盘指数"
+      description="实时抓取自新浪行情，每 3 秒刷新"
+      variant="glass"
+    >
+      <template #extra>
+        <el-button
+          :icon="Refresh"
+          size="small"
+          text
+          :loading="refreshing"
+          @click="handleIndexScan"
+        >
+          红利指数扫描
+        </el-button>
+      </template>
+      <IndexCards :indices="indices" :loading="indicesLoading" />
+    </ModernCard>
+
+    <!-- 高股息股票 -->
+    <ModernCard
+      title="高股息股票"
+      description="按股息率倒序（Top 20）· A 股惯例：红涨绿跌"
+      variant="bordered"
+    >
+      <template #extra>
+        <el-button text type="primary" size="small" @click="router.push({ name: 'Stocks' })">
+          查看全量
+          <el-icon class="el-icon--right"><ArrowRight /></el-icon>
+        </el-button>
+      </template>
+      <StockTable :stocks="stocks" :loading="stocksLoading" @search="openStockSearch" />
+    </ModernCard>
+
+    <!-- 任务日志 -->
+    <ModernCard
+      title="任务执行日志"
+      description="最近 50 条扫描任务记录"
+    >
+      <TaskLogs :logs="logs" :loading="logsLoading" />
+    </ModernCard>
+
+    <StockSearch v-model:visible="searchVisible" :symbol="searchSymbol" />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/task'
-import { getLiveIndices, getTopStocks, getLogs } from '../api'
+import { useAuthStore } from '../stores/auth'
+import {
+  getLiveIndices, getTopStocks, getLogs, indexScan, fullRefreshData,
+  getVix, getVixHistory, recomputeVix, getTask,
+} from '../api'
+import { ElMessage } from 'element-plus'
+import { Refresh, Search, RefreshRight, ArrowRight, Clock } from '@element-plus/icons-vue'
+
+import PageHeader from '../components/ui/PageHeader.vue'
+import ModernCard from '../components/ui/ModernCard.vue'
+import StatCard from '../components/ui/StatCard.vue'
+import GradientBlob from '../components/ui/GradientBlob.vue'
 import IndexCards from '../components/IndexCards.vue'
 import StockTable from '../components/StockTable.vue'
 import StockSearch from '../components/StockSearch.vue'
 import TaskLogs from '../components/TaskLogs.vue'
+import VixGauge from '../components/VixGauge.vue'
+import VixTrendChart from '../components/VixTrendChart.vue'
+import EmptyHint from '../components/ui/EmptyHint.vue'
 
 const router = useRouter()
 const taskStore = useTaskStore()
+const auth = useAuthStore()
 
 const indices = ref([])
 const stocks = ref([])
@@ -36,6 +276,136 @@ const stocksLoading = ref(false)
 const logsLoading = ref(false)
 const searchVisible = ref(false)
 const searchSymbol = ref('')
+const refreshing = ref(false)
+const fullRefreshing = ref(false)
+
+const totalPnl = ref(0)
+const now = ref(new Date())
+let clockTimer = null
+
+const vix = ref(null)
+const vixHistory = ref([])
+const vixRecomputing = ref(false)
+let vixPollTimer = null
+
+const anyLoading = computed(
+  () => indicesLoading.value || stocksLoading.value || logsLoading.value
+)
+const runningTaskCount = computed(
+  () => logs.value.filter((l) => l.status === 'running').length
+)
+
+const greeting = computed(() => {
+  const h = now.value.getHours()
+  const u = (auth.username || '朋友').trim()
+  if (h < 6)  return `夜深了，${u}，注意休息`
+  if (h < 11) return `早上好，${u}`
+  if (h < 14) return `中午好，${u}`
+  if (h < 18) return `下午好，${u}`
+  return `晚上好，${u}`
+})
+
+const lastSyncLabel = computed(() => {
+  const d = now.value
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+})
+
+const clockLabel = computed(() => {
+  const d = now.value
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+})
+
+const pnlTone = computed(() => {
+  if (totalPnl.value > 0) return 'up'
+  if (totalPnl.value < 0) return 'down'
+  return 'default'
+})
+const pnlHint = computed(() => {
+  if (totalPnl.value > 0) return '当前组合处于盈利状态'
+  if (totalPnl.value < 0) return '当前组合处于亏损状态'
+  return '暂无盈亏数据'
+})
+
+// ── VIX ──
+const fgBand = computed(() => {
+  const v = vix.value?.fear_greed
+  if (v == null) return 'neutral'
+  if (v < 25) return 'fear'
+  if (v < 50) return 'fear-soft'
+  if (v < 75) return 'greed-soft'
+  return 'greed'
+})
+
+const DASHBOARD_SIGNAL_LABELS = {
+  vix: 'VIX 主体', rv_chg: 'RV 变化', pcr: 'PCR',
+  margin: '融资余额', limit: '涨跌停', spot: '现货位置',
+}
+const dashboardMissingSignals = computed(() => {
+  const sigs = vix.value?.data_quality?.signals || {}
+  return Object.keys(sigs).filter((k) => !sigs[k])
+})
+function missingLabel(k) { return DASHBOARD_SIGNAL_LABELS[k] || k }
+
+function fmt(v, digits = 2) {
+  if (v == null || Number.isNaN(v)) return '—'
+  return Number(v).toFixed(digits)
+}
+
+async function fetchVix() {
+  try {
+    const { data } = await getVix()
+    vix.value = data
+  } catch {
+    vix.value = null
+  }
+}
+async function fetchVixHistory() {
+  try {
+    const { data } = await getVixHistory(60)
+    vixHistory.value = data?.data || []
+  } catch {
+    vixHistory.value = []
+  }
+}
+
+async function handleRecomputeVix() {
+  if (vixRecomputing.value) return
+  vixRecomputing.value = true
+  try {
+    const { data } = await recomputeVix()
+    const taskId = data?.task_id
+    ElMessage.success('VIX 重算已提交')
+    if (!taskId) { vixRecomputing.value = false; return }
+    if (vixPollTimer) clearInterval(vixPollTimer)
+    vixPollTimer = setInterval(async () => {
+      try {
+        const { data: task } = await getTask(taskId)
+        if (['completed', 'failed', 'cancelled'].includes(task?.status)) {
+          clearInterval(vixPollTimer)
+          vixPollTimer = null
+          vixRecomputing.value = false
+          await fetchVix()
+          await fetchVixHistory()
+        }
+      } catch {
+        clearInterval(vixPollTimer)
+        vixPollTimer = null
+        vixRecomputing.value = false
+      }
+    }, 2000)
+  } catch (e) {
+    ElMessage.error('VIX 重算失败: ' + (e.response?.data?.error || e.message))
+    vixRecomputing.value = false
+  }
+}
+
+function formatPnl(v) {
+  if (!v) return '¥ 0.00'
+  const sign = v > 0 ? '+' : v < 0 ? '−' : ''
+  return `${sign}¥ ${Math.abs(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
 
 async function fetchIndices() {
   indicesLoading.value = true
@@ -48,7 +418,6 @@ async function fetchIndices() {
     indicesLoading.value = false
   }
 }
-
 async function fetchStocks() {
   stocksLoading.value = true
   try {
@@ -60,7 +429,6 @@ async function fetchStocks() {
     stocksLoading.value = false
   }
 }
-
 async function fetchLogs() {
   logsLoading.value = true
   try {
@@ -72,40 +440,346 @@ async function fetchLogs() {
     logsLoading.value = false
   }
 }
-
+function refreshAll() {
+  fetchIndices(); fetchStocks(); fetchLogs()
+}
 function openStockSearch(symbol) {
-  if (typeof symbol === 'object' && symbol !== null) {
-    symbol = symbol.code || ''
-  }
+  if (typeof symbol === 'object' && symbol !== null) symbol = symbol.code || ''
   if (!symbol) return
   searchSymbol.value = String(symbol)
   searchVisible.value = true
 }
+async function handleIndexScan() {
+  if (taskStore.currentTask?.status === 'running') {
+    ElMessage.warning('已有扫描任务在运行'); return
+  }
+  refreshing.value = true
+  try {
+    const { data } = await indexScan()
+    ElMessage.success('红利指数扫描已提交')
+    taskStore.startPolling(data.task_id)
+  } catch (e) {
+    if (e.response?.status === 409) {
+      ElMessage.warning(e.response?.data?.error || '已有扫描任务在运行')
+    } else {
+      ElMessage.error('刷新失败: ' + (e.response?.data?.error || e.message))
+    }
+  } finally { refreshing.value = false }
+}
+async function handleFullRefresh() {
+  if (taskStore.currentTask?.status === 'running') {
+    ElMessage.warning('已有扫描任务在运行'); return
+  }
+  fullRefreshing.value = true
+  try {
+    const { data } = await fullRefreshData()
+    ElMessage.success(data.message || '全市场扫描已启动')
+    taskStore.startPolling(data.task_id)
+  } catch (e) {
+    if (e.response?.status === 409) {
+      ElMessage.warning(e.response?.data?.error || '已有扫描任务在运行')
+    } else {
+      ElMessage.error('全市场扫描启动失败: ' + (e.response?.data?.error || e.message))
+    }
+  } finally { fullRefreshing.value = false }
+}
 
-// scan 完成时自动刷新数据
 watch(
   () => taskStore.currentTask?.status,
   (status) => {
-    if (status === 'success' || status === 'failed') {
-      fetchIndices()
-      fetchStocks()
-      fetchLogs()
-    }
+    if (status === 'success' || status === 'failed') refreshAll()
   }
 )
 
 onMounted(() => {
-  fetchIndices()
-  fetchStocks()
-  fetchLogs()
+  fetchIndices(); fetchStocks(); fetchLogs()
+  fetchVix(); fetchVixHistory()
+  clockTimer = setInterval(() => { now.value = new Date() }, 1000)
+})
+onUnmounted(() => {
+  if (clockTimer) clearInterval(clockTimer)
+  if (vixPollTimer) clearInterval(vixPollTimer)
 })
 </script>
 
 <style scoped>
-.stock-table-header {
+.dashboard {
+  position: relative;
+  min-height: calc(100vh - var(--space-12));
+}
+
+/* 装饰背景层 */
+.dashboard__ambient {
+  position: fixed;
+  top: 0; right: 0; bottom: 0; left: var(--layout-sidebar-width);
+  pointer-events: none;
+  z-index: 0;
+  overflow: hidden;
+}
+
+/* 让所有内容浮在装饰背景之上 */
+.dashboard > :not(.dashboard__ambient) {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── PageHeader 内的 meta 元素 ── */
+.welcome-glyph {
+  font-size: 22px;
+  line-height: 1;
+  display: block;
+}
+.meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  font-weight: var(--weight-medium);
+}
+.meta-divider {
+  width: 1px;
+  height: 12px;
+  background: var(--color-border-strong);
+  display: inline-block;
+}
+.meta-icon {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+.meta-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-size: 10px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-right: 4px;
+}
+
+/* 状态指示点 + 脉冲 */
+.meta-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  display: inline-block;
+  position: relative;
+}
+.meta-dot--pulse::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  border-radius: 50%;
+  background: var(--color-success);
+  animation: pulse-ring 1.8s var(--ease) infinite;
+  z-index: -1;
+}
+@keyframes pulse-ring {
+  0%   { transform: scale(1);   opacity: 0.6; }
+  100% { transform: scale(2.8); opacity: 0;   }
+}
+
+/* ── KPI 网格 ── */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-5);
+  margin-bottom: var(--space-6);
+}
+
+/* ModernCard 之间的呼吸感 */
+.dashboard > .modern-card,
+.dashboard > .kpi-grid {
+  margin-bottom: var(--space-6);
+}
+.dashboard > .vix-quality {
+  margin-top: calc(var(--space-2) * -1);
+  margin-bottom: var(--space-6);
+}
+.dashboard > .modern-card:last-of-type {
+  margin-bottom: 0;
+}
+
+.vix-quality {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
+  gap: 10px;
+  padding: 8px 14px;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  font-weight: var(--weight-medium);
+  border-top: 1px dashed var(--color-border);
+  margin-top: -8px;
+  flex-wrap: wrap;
+}
+.vix-quality__icon {
+  font-size: 13px;
+}
+.vix-quality strong {
+  color: var(--color-text-secondary);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  margin: 0 2px;
+}
+
+/* 响应式：窄屏收紧间距 */
+@media (max-width: 1024px) {
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 640px) {
+  .kpi-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── VIX 行 ── */
+.vix-row {
+  display: grid;
+  grid-template-columns: 280px 1fr 1.2fr;
+  gap: var(--space-6);
+  align-items: stretch;
+}
+
+.vix-fg {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.vix-fg__label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-tertiary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.vix-fg__value {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  line-height: 1;
+}
+.vix-fg__num {
+  font-size: 36px;
+  font-weight: var(--weight-bold);
+  color: var(--color-text-primary);
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}
+.vix-fg__max {
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+  font-weight: var(--weight-medium);
+}
+
+.vix-fg__bar {
+  position: relative;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: linear-gradient(90deg,
+    #fecaca 0%, #fed7aa 25%, #fef3c7 50%, #d1fae5 75%, #a7f3d0 100%);
+  overflow: hidden;
+  margin-top: 4px;
+}
+.vix-fg__fill {
+  position: absolute;
+  top: 0; bottom: 0; right: 0;
+  background: rgba(24, 24, 27, 0.65);
+  border-radius: var(--radius-full);
+  transition: width 600ms var(--ease);
+}
+.vix-fg__ticks {
+  position: relative;
+  height: 14px;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+}
+.vix-fg__ticks span {
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.vix-subgrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+.vix-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-muted);
+  border: 1px solid var(--color-border);
+  min-width: 0;
+}
+.vix-sub__label {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.02em;
+}
+.vix-sub__val {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.vix-sub__sep {
+  margin: 0 4px;
+  color: var(--color-text-tertiary);
+  font-weight: var(--weight-regular);
+}
+.text-up   { color: var(--color-up);   font-weight: var(--weight-semibold); }
+.text-down { color: var(--color-down); font-weight: var(--weight-semibold); }
+
+.vix-trend-wrap {
+  min-width: 0;
+  padding: var(--space-2) 0 0;
+  border-left: 1px solid var(--color-border);
+  padding-left: var(--space-5);
+  /* 不加 display:flex / align-items:center：
+     Vue scoped CSS 会把父级 .vix-trend-wrap 的 data-v 透传到 <VixTrendChart />
+     的根元素，使其也变成 flex item；toolbar 是 absolute 不占位，
+     唯一在流的子元素 .vix-trend（width:100%）就会因 flex 收缩到 0，
+     导致图表不可见、toolbar 漂浮在空区域里，看起来「点了没反应」。 */
+}
+
+@media (max-width: 1280px) {
+  .vix-row {
+    grid-template-columns: 240px 1fr;
+  }
+  .vix-trend-wrap {
+    grid-column: 1 / -1;
+    border-left: 0;
+    border-top: 1px solid var(--color-border);
+    padding-left: 0;
+    padding-top: var(--space-3);
+  }
+}
+@media (max-width: 768px) {
+  .vix-row {
+    grid-template-columns: 1fr;
+  }
+  .vix-trend-wrap {
+    border-top: 1px solid var(--color-border);
+    padding-left: 0;
+    padding-top: var(--space-3);
+  }
+  .vix-subgrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 </style>

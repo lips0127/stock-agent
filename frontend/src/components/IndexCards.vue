@@ -1,8 +1,5 @@
 <template>
-  <el-card shadow="never" class="section-card">
-    <template #header>
-      <span class="section-title">大盘指数</span>
-    </template>
+  <ModernCard title="大盘指数" description="实时行情（新浪接口）">
     <div v-loading="loading" class="indices-grid">
       <template v-if="indices.length">
         <div
@@ -18,12 +15,20 @@
           </div>
         </div>
       </template>
-      <el-empty v-else description="暂无指数数据" :image-size="60" />
+      <EmptyHint
+        v-else-if="!loading"
+        icon="∅"
+        title="暂无指数数据"
+        description="等待定时任务拉取，或点击右上角刷新"
+      />
     </div>
-  </el-card>
+  </ModernCard>
 </template>
 
 <script setup>
+import ModernCard from './ui/ModernCard.vue'
+import EmptyHint from './ui/EmptyHint.vue'
+
 defineProps({
   indices: { type: Array, default: () => [] },
   loading: Boolean,
@@ -44,47 +49,46 @@ function formatChange(pct) {
 .indices-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 14px;
+  gap: var(--space-3);
 }
 .index-item {
-  background: #f8f9fb;
-  border-radius: 10px;
-  padding: 16px 16px 16px 20px;
-  border-left: 4px solid transparent;
-  transition: box-shadow 0.25s ease, transform 0.15s ease;
+  background: var(--color-bg-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-4) var(--space-4) var(--space-5);
+  border-left: 3px solid transparent;
+  transition: all var(--duration-base) var(--ease);
   cursor: default;
 }
 .index-item:hover {
-  box-shadow: var(--shadow-card-hover);
+  background: var(--color-bg-muted);
   transform: translateY(-1px);
 }
-.index-item.is-up {
-  border-left-color: var(--color-up);
-}
-.index-item.is-down {
-  border-left-color: var(--color-down);
-}
+.index-item.is-up { border-left-color: var(--color-up); }
+.index-item.is-down { border-left-color: var(--color-down); }
+
 .index-name {
-  font-size: 13px;
-  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
   margin-bottom: 6px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.02em;
 }
 .index-value {
-  font-size: 24px;
-  font-weight: 700;
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
   color: var(--color-text-primary);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
 }
 .index-change {
-  font-size: 13px;
+  font-size: var(--text-sm);
   margin-top: 4px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
 }
-.is-up .index-change {
-  color: var(--color-up);
-}
-.is-down .index-change {
-  color: var(--color-down);
-}
+.is-up .index-change { color: var(--color-up); }
+.is-down .index-change { color: var(--color-down); }
 .change-arrow {
   font-size: 10px;
   margin-right: 2px;
