@@ -627,6 +627,45 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rph_hash "
                     "ON report_parse_history(report_text_hash)")
 
+        # ── 十倍股/财报异动扫描器（2026-06-30，feature/tenbag-scanner）──
+        cur.execute("""CREATE TABLE IF NOT EXISTS tenbag_anomaly_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            report_date TEXT,
+            signals_json TEXT,
+            score REAL,
+            core_changes_json TEXT,
+            risks_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(symbol, report_date)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tas_symbol "
+                    "ON tenbag_anomaly_signals(symbol, report_date DESC)")
+
+        cur.execute("""CREATE TABLE IF NOT EXISTS tenbag_trend_signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            date TEXT NOT NULL,
+            signals_json TEXT,
+            regime TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(symbol, date)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tts_symbol "
+                    "ON tenbag_trend_signals(symbol, date DESC)")
+
+        cur.execute("""CREATE TABLE IF NOT EXISTS tenbag_pools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            pool_tier TEXT NOT NULL,
+            reasons_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(snapshot_date, symbol)
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tenbag_pools_date_tier "
+                    "ON tenbag_pools(snapshot_date, pool_tier)")
+
 
 
 def _create_default_admin(conn):
@@ -2477,4 +2516,90 @@ def get_recent_report_parses(limit: int = 20) -> list[dict]:
                ORDER BY created_at DESC LIMIT ?""",
             (limit,),
         )
+        return [dict(r) for r in cur.fetchall()]
+
+
+# ── 十倍股/财报异动扫描器 CRUD（2026-06-30，feature/tenbag-scanner）──
+
+def _dumps(val):
+    import json
+    if val is None:
+        return None
+    return json.dumps(val, ensure_ascii=False)
+
+
+def upsert_tenbag_anomaly(symbol: str, report_date, signals: dict,
+                          score=None, core_changes=None, risks=None) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO tenbag_anomaly_signals
+               (symbol, report_date, signals_json, score,
+                core_changes_json, risks_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            (symbol, report_date, _dumps(signals), score,
+             _dumps(core_changes), _dumps(risks)),
+        )
+
+
+def get_tenbag_anomaly(symbol: str, report_date) -> dict | None:
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT * FROM tenbag_anomaly_signals
+               WHERE symbol=? AND report_date=?""",
+            (symbol, report_date),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def upsert_tenbag_trend(symbol: str, date: str, signals: dict, regime=None) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO tenbag_trend_signals
+               (symbol, date, signals_json, regime, created_at)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            (symbol, date, _dumps(signals), regime),
+        )
+
+
+def get_tenbag_trend(symbol: str, date: str) -> dict | None:
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT * FROM tenbag_trend_signals
+               WHERE symbol=? AND date=?""",
+            (symbol, date),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def upsert_tenbag_pool(snapshot_date: str, symbol: str, pool_tier: str,
+                       reasons=None) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO tenbag_pools
+               (snapshot_date, symbol, pool_tier, reasons_json, created_at)
+               VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            (snapshot_date, symbol, pool_tier, _dumps(reasons)),
+        )
+
+
+def list_tenbag_pools(snapshot_date: str, tier: str | None = None) -> list[dict]:
+    with get_connection() as conn:
+        cur = conn.cursor()
+        if tier:
+            cur.execute(
+                """SELECT * FROM tenbag_pools
+                   WHERE snapshot_date=? AND pool_tier=?
+                   ORDER BY symbol""",
+                (snapshot_date, tier),
+            )
+        else:
+            cur.execute(
+                """SELECT * FROM tenbag_pools
+                   WHERE snapshot_date=? ORDER BY pool_tier, symbol""",
+                (snapshot_date,),
+            )
         return [dict(r) for r in cur.fetchall()]

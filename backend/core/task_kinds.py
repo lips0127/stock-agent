@@ -25,6 +25,9 @@ TASK_KINDS: dict[str, dict] = {
     "zhihu_check_all":                {"label": "知乎全量检查",    "icon": "📬", "category": "知乎"},
     "forum_prefetch":                 {"label": "股吧帖子预拉",    "icon": "📥", "category": "舆情"},
     "financial_report_parse":         {"label": "财报解析",        "icon": "📄", "category": "舆情"},
+    "tenbag_scan":                    {"label": "十倍股扫描",      "icon": "🚀", "category": "选股"},
+    "tenbag_report_analyze":          {"label": "年报深度分析",    "icon": "📑", "category": "选股"},
+    "industry_prosperity_refresh":    {"label": "行业景气刷新",    "icon": "🏭", "category": "选股"},
 }
 
 

@@ -1,5 +1,41 @@
 # Change Log
 
+## 2026-07-01
+
+### 十倍股/财报异动扫描器 — Step 0~2（feature/tenbag-scanner）
+
+新增特性分支 `feature/tenbag-scanner`，合并开发「十倍股早期信号扫描器」+「财报异动扫描器（基本面雷达）」。本期完成基础设施 + 模块二 + 异动定量信号（MVP 三件套的前两件）。
+
+**Step 0 — 基础设施**：
+- 新设计书 `docs/tenbag-scanner-design.md`（模块边界/信号定义/分层规则/DB schema/task kinds/API/口径约束）。
+- `task_kinds.py` 注册 `tenbag_scan` / `tenbag_report_analyze` / `industry_prosperity_refresh`。
+- `database.py` 新增 3 表：`tenbag_anomaly_signals` / `tenbag_trend_signals` / `tenbag_pools` + 5 个 CRUD helper（`upsert_tenbag_anomaly` / `get_tenbag_anomaly` / `upsert_tenbag_trend` / `get_tenbag_trend` / `upsert_tenbag_pool` / `list_tenbag_pools`）。
+- TDD：`tests/test_tenbag_db.py`（5 用例，先红后绿）。
+
+**Step 1 — 模块二 股价趋势分析器**（`backend/services/tenbag_trend_service.py`，纯量化零依赖）：
+- `compute_trend_signals(daily_bars, benchmark_bars=None)`：月线重采样、月线 MA12/MA24、日线 MA60/MA120、距 52 周高点回撤、月度创新高占比、月度放量量比、相对大盘强度 RS、regime 判定（`stage2_breakout` / `advancing` / `consolidation` / `downtrend`）。
+- regime 主锚点用日线 MA60（短历史也可用），月线 MA12/24 作信息项。
+- TDD：`tests/test_tenbag_trend.py`（9 用例）。实测 600519 真实数据 → downtrend / 回撤 -22.36%，符合预期。
+
+**Step 2 — 财报异动定量信号**（`backend/services/tenbag_anomaly_service.py`）：
+- `derive_anomaly_signals(financials)` 纯函数：营收/利润高增、毛利率改善、存货下降、合同负债上升、在建工程转固、应收风险、现金流滞后 → 输出 `{signals, core_changes, possible_explanations, risks, score, conclusion}`，对齐用户异动扫描器模板。按 report_date 排序兼容任意输入顺序。
+- `fetch_balance_sheet_em` / `fetch_cash_flow_em` / `fetch_financials_em`：akshare EM 接口抓取，英文代号列归一化（`INVENTORY`→存货 等，2026-07-01 demo 实测确认）。复用 `financial_service` 损益摘要 + `_no_proxy` + `_full_symbol`。
+- TDD：`tests/test_tenbag_anomaly.py`（9 用例，akshare 全 mock 不联网）。
+
+**demo 实测先行闸门（用户强制要求）**：
+- `scripts/demo_tenbag_kline.py`：腾讯日 K 实测通过（600519，366 根，字段完整）。
+- `scripts/demo_tenbag_balance_sheet.py`：EM 资产负债表实测通过，确认列名为英文代号（`INVENTORY`/`CONTRACT_LIAB`/`CIP`/`ACCOUNTS_RECE`/`FIXED_ASSET`），自带 `_YOY` 同比列。
+- `scripts/demo_tenbag_cash_flow.py`：EM 现金流实测通过，`NETCASH_OPERATE` 命中（茅台 2025 年报 ~615 亿）。
+- ⚠️ EM 接口逐期抓取，单只 2-3 分钟，全市场不可行 → 候选池限定热门股池 top 50、财报仅取近 4 期（用户确认）。
+
+**口径**：输出是观察池/基本面雷达，不是买卖信号（同 VIX 约束）。
+
+**回归**：45 个测试全绿（tenbag_db 5 + tenbag_trend 9 + tenbag_anomaly 9 + task_runner 22）。
+
+**待续**：Step 3 分层器、Step 4 API+调度、Step 5 前端、Step 6 PDF 解析器（需 demo 实测 cninfo+MiniMax）、Step 7 行业景气。
+
+---
+
 ## 2026-06-28
 
 ### VIX 算法 v6 / v6.1 — 多 ETF 合成生效 + 评审采纳调整

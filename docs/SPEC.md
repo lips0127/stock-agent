@@ -3598,3 +3598,90 @@ extreme + normal 共享同一 `markers` 数组，但渲染时分流——前端�
 - 触发型端点缺 `@rate_limit`（ops/sentiment/backtest）。
 - CORS 默认 `*`（docker-compose 覆盖）。
 - N+1 查询（`nav.py:86,240`、`forum_service.py:738`）。
+
+---
+
+## 19. 十倍股/财报异动扫描器（feature/tenbag-scanner, 2026-07-01）
+
+### 19.1 目标与定位
+
+合并实现两个相关 idea：
+1. **十倍股早期信号扫描器** — 不预测涨十倍，多信号筛选「可能具备大牛股胚子」的公司，输出**分层观察池**（一级=基本面明显变化 / 二级=逻辑性感业绩未兑现 / 三级=概念强财务弱 / 排除=纯炒作）。
+2. **财报异动扫描器（基本面雷达）** — 全市场扫财报找异动信号，输出 公司/行业/核心变化/可能解释/风险/结论。
+
+异动扫描器 = 信号提取层，其产出喂给十倍股分层器。两者共享 DB 表 / task kinds / 数据抓取基础设施。**口径约束：输出是观察池/基本面雷达，不是买卖信号**（同 §11 VIX 约束，前端与 API 文案严禁「买入/卖出」措辞）。
+
+### 19.2 模块边界
+
+| 模块 | 职责 | 类型 | 状态 |
+|------|------|------|------|
+| M2 股价趋势分析器 | 月线趋势确认 | 纯量化 | ✅ Step 1 |
+| 异动定量信号 | 营收/利润高增、毛利率改善、存货下降、合同负债上升、在建工程转固、应收风险、现金流跟上 | 定量（akshare 结构化财报） | ✅ Step 2 |
+| 分层器 | 规则分层 → 一/二/三级 + 排除池 | 确定性规则 | 待 Step 3 |
+| M1 财报 PDF 解析器 | 新产品/产能/增持/机构覆盖 | LLM（MiniMax M3） | 待 Step 6 |
+| M3 高景气行业 | 高景气赛道 + 产业链卡位 | 数据驱动 | 待 Step 7 |
+
+### 19.3 数据库 schema（新增 3 表）
+
+```sql
+CREATE TABLE tenbag_anomaly_signals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL, report_date TEXT,
+  signals_json TEXT, score REAL,
+  core_changes_json TEXT, risks_json TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(symbol, report_date)
+);
+CREATE TABLE tenbag_trend_signals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol TEXT NOT NULL, date TEXT NOT NULL,
+  signals_json TEXT, regime TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(symbol, date)
+);
+CREATE TABLE tenbag_pools (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_date TEXT NOT NULL, symbol TEXT NOT NULL,
+  pool_tier TEXT NOT NULL, reasons_json TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(snapshot_date, symbol)
+);
+CREATE INDEX idx_tenbag_pools_date_tier ON tenbag_pools(snapshot_date, pool_tier);
+```
+
+### 19.4 模块二 股价趋势分析器（`backend/services/tenbag_trend_service.py`）
+
+`compute_trend_signals(daily_bars, benchmark_bars=None)` 纯函数，输入日 K 列表（复用 `financial_service._fetch_tencent_kline`）→ 输出 `{monthly_bars, ma12_monthly, ma24_monthly, ma60_daily, ma120_daily, drawdown_from_high, new_high_ratio, volume_ratio, relative_strength, regime}`。
+
+regime 判定（主锚点日线 MA60，回退月线 MA12）：
+- `stage2_breakout`：站上趋势 MA + 距 52 周高点回撤 > -15% + 新高比例 ≥ 0.3
+- `advancing`：站上趋势 MA 但未满足 stage2 全部条件
+- `downtrend`：跌破趋势 MA
+- `consolidation`：其他
+
+### 19.5 财报异动定量信号（`backend/services/tenbag_anomaly_service.py`）
+
+`derive_anomaly_signals(financials)` 纯函数，输入近 4 期结构化财报 → 输出 `{signals, core_changes, possible_explanations, risks, score, conclusion}`。信号阈值集中可调（营收/利润高增 ≥30% YoY、毛利率改善 ≥5pct、合同负债升 ≥30%、存货降 ≥10%、应收风险=应收增速/营收增速>1.2、现金流滞后=经营现金流/净利润<0.5）。
+
+akshare 抓取（EM 接口，2026-07-01 demo 实测）：`fetch_balance_sheet_em` / `fetch_cash_flow_em` / `fetch_financials_em`。字段归一化映射：`INVENTORY`→存货、`CONTRACT_LIAB`→合同负债、`CIP`→在建工程、`ACCOUNTS_RECE`→应收账款、`FIXED_ASSET`→固定资产、`NETCASH_OPERATE`→经营现金流净额。
+
+### 19.6 数据拉取接口「demo 实测先行」闸门
+
+每个新建数据/PDF/LLM 拉取接口，集成前必须先写 `scripts/demo_tenbag_*.py` 实测交用户 review。已通过：腾讯日 K、EM 资产负债表、EM 现金流。待测：巨潮资讯 cninfo 年报 PDF、MiniMax M3 结构化提取（Step 6）。
+
+### 19.7 候选池与性能约束
+
+EM 财报接口逐期抓取，单只 2-3 分钟，全市场不可行。MVP：候选池 = 热门股池 top 50（复用 `top_picks_service`），财报仅取近 4 期，DB 缓存。
+
+### 19.8 实施进度
+
+| Step | 内容 | 状态 |
+|------|------|------|
+| 0 | 分支 + 设计书 + task_kinds + DB schema TDD | ✅ |
+| 1 | 模块二趋势分析器 TDD + demo | ✅ |
+| 2 | 异动定量信号 TDD + demo | ✅ |
+| 3 | 分层器 TDD | 待 |
+| 4 | API + 异步任务 + 调度 | 待 |
+| 5 | 前端页面 | 待 |
+| 6 | M1 PDF 解析器（demo 实测 cninfo+MiniMax） | 待 |
+| 7 | M3 行业景气 | 待 |
