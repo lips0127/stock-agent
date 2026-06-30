@@ -108,18 +108,22 @@ def daily_update_task():
 
     try:
         log_message("Starting daily dividend index scan")
+        last_err = None
         for attempt in range(1, SCHEDULER_MAX_RETRIES + 1):
             try:
                 scan_dividend_index(max_workers=SCAN_MAX_WORKERS)
                 log_message("Daily dividend index scan completed successfully")
                 return
             except Exception as e:
+                last_err = e
                 logger.error(f"每日红利指数扫描第 {attempt} 次尝试失败: {e}", exc_info=True)
                 log_message(f"Attempt {attempt} failed: {e}")
                 if attempt < SCHEDULER_MAX_RETRIES:
                     time.sleep(SCHEDULER_RETRY_INTERVAL)
         logger.error("每日红利指数扫描所有重试均失败")
         log_message("All retry attempts failed")
+        if last_err is not None:
+            raise last_err
     finally:
         with _scan_lock:
             _scan_running = False
@@ -180,6 +184,7 @@ def zhihu_check_task():
     except Exception as e:
         logger.error(f"知乎检查任务失败: {e}", exc_info=True)
         log_message(f"知乎检查失败: {e}")
+        raise
     finally:
         with _zhihu_lock:
             _zhihu_running = False
@@ -195,6 +200,7 @@ def daily_vix_task():
     with _vix_lock_local:
         from backend.services.vix_service import compute_and_store
         log_message("开始每日 VIX 计算...")
+        vix_err = None
         try:
             snap = compute_and_store()
             if snap:
@@ -205,6 +211,7 @@ def daily_vix_task():
             else:
                 log_message("VIX 计算返回 None（数据源全部不可用）")
         except Exception as e:
+            vix_err = e
             logger.error(f"VIX 计算失败: {e}", exc_info=True)
             log_message(f"VIX 计算失败: {e}")
 
@@ -222,6 +229,9 @@ def daily_vix_task():
         except Exception as e:
             logger.error(f"VIX2.0 推断失败: {e}", exc_info=True)
             log_message(f"VIX2.0 推断失败: {e}")
+
+        if vix_err is not None:
+            raise vix_err
 
 
 @track_run("daily_top_picks")
@@ -364,6 +374,7 @@ def weekly_universe_constituents_task():
     except Exception as e:
         logger.exception(f"Weekly universe constituents 失败: {e}")
         log_message(f"Weekly universe constituents 失败: {e}")
+        raise
     finally:
         with _universe_cons_lock:
             _universe_cons_running = False
@@ -395,6 +406,7 @@ def daily_universe_crawl_task():
     except Exception as e:
         logger.exception(f"Daily universe crawl 失败: {e}")
         log_message(f"Daily universe crawl 失败: {e}")
+        raise
     finally:
         with _universe_crawl_lock:
             _universe_crawl_running = False
@@ -417,6 +429,7 @@ def daily_universe_aggregate_task():
     except Exception as e:
         logger.exception(f"Daily universe aggregate 失败: {e}")
         log_message(f"Daily universe aggregate 失败: {e}")
+        raise
     finally:
         with _universe_agg_lock:
             _universe_agg_running = False
