@@ -114,10 +114,12 @@ CREATE INDEX idx_tenbag_pools_date_tier ON tenbag_pools(snapshot_date, pool_tier
 
 | Method | Path | 说明 |
 |--------|------|------|
-| POST | `/api/tenbag/scan` | 触发扫描（异步，返回 task_id） |
-| GET | `/api/tenbag/pools?tier=&date=` | 分层结果列表 |
+| POST | `/api/tenbag/scan` | 触发扫描（异步，返回 task_id），body `{top_n}`，防重 409 |
+| GET | `/api/tenbag/pools?tier=&date=` | 分层结果列表（默认最新快照） |
 | GET | `/api/tenbag/signals/<symbol>` | 单股异动+趋势信号详情 |
-| GET | `/api/tenbag/health` | 生产线健康 |
+| GET | `/api/tenbag/health` | 生产线健康（最近快照/各 tier 数量/最近任务） |
+
+蓝图 `tenbag_bp`，注册于 `app.py`。编排见 `tenbag_scan_service.run_scan`（候选池 `get_latest_top_picks` top50，逐只 trend+anomaly+pool 落库）。
 
 ## 8. 数据拉取接口「demo 实测先行」闸门
 

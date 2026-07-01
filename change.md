@@ -46,6 +46,16 @@
 
 industry_signals 为 M3 预留（高景气加成仅影响 reasons）。TDD：`tests/test_tenbag_pool.py`（9 用例）。E2E 实测 600519（downtrend + 无异动 → 排除池）符合预期。54 测试全绿。
 
+### Step 4 API + 异步任务 + 调度（feature/tenbag-scanner）
+
+- `backend/services/tenbag_scan_service.py` `run_scan(task_runner, top_n=50, snapshot_date)`：编排候选池（`get_latest_top_picks` top50）→ 逐只 `_scan_single`（趋势→异动→分层→落库 3 表）→ 返回 `{scanned, failed, tiers}`。单只失败隔离；`_latest_report_date` 兼容升降序。TDD `tests/test_tenbag_scan.py`（4 用例，fetch 全 mock）。
+- `backend/api/routes/tenbag.py`（蓝图 `tenbag_bp`，注册于 `app.py`）：`POST /api/tenbag/scan`（异步 TaskRunner 返回 task_id，防重 409，body `{top_n}`）、`GET /api/tenbag/pools`、`GET /api/tenbag/signals/<symbol>`、`GET /api/tenbag/health`。TDD `tests/test_tenbag_routes.py`（8 用例，含鉴权/scan 启动）。
+- `scheduler.py` `daily_tenbag_scan_task`（`@track_run("daily_tenbag_scan")` + 函数级锁，工作日 17:00，长任务~2h）+ `_TASK_FUNCS` + `scheduler_config_service.JOB_REGISTRY`（cron 17:00 mon-fri）。
+- 调度 kind=`daily_tenbag_scan`、手动 kind=`tenbag_scan`（双 kind 惯例同 vix）。
+- SPEC §19.5.2/3/4 + design + change.md 同步。66 测试全绿（含 scheduler 回归）。
+
+**待续**：Step 5 前端页面、Step 6 PDF 解析器（需 demo 实测 cninfo+MiniMax）、Step 7 行业景气。
+
 ---
 
 ## 2026-06-28

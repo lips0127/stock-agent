@@ -205,8 +205,9 @@ def daily_vix_task():
             snap = compute_and_store()
             if snap:
                 log_message(
-                    f"VIX 计算完成: date={snap.date} VIX={snap.vix} "
-                    f"FG={snap.fear_greed} regime={snap.regime}"
+                    f"VIX 计算完成: date={snap.date} "
+                    f"大盘(VIX={snap.large_vix} FG={snap.large_fg} {snap.large_regime}) "
+                    f"小盘(VIX={snap.small_vix} FG={snap.small_fg} {snap.small_regime})"
                 )
             else:
                 log_message("VIX 计算返回 None（数据源全部不可用）")
@@ -232,6 +233,33 @@ def daily_vix_task():
 
         if vix_err is not None:
             raise vix_err
+
+
+@track_run("daily_tenbag_scan")
+def daily_tenbag_scan_task():
+    """每日盘后跑十倍股/财报异动扫描（默认 17:00）。
+
+    长任务（候选 top50 × EM 财报 ~2-3 分钟/只 ≈ 2h），函数级锁防自重叠。
+    track_run 提供任务生命周期记录；run_scan 内部按需可读 contextvar 取
+    task_run_id（本调度路径不传 task_runner，故无逐只进度，只有起止）。
+    """
+    _lock = getattr(daily_tenbag_scan_task, "_lock", None)
+    if _lock is None:
+        _lock = threading.Lock()
+        daily_tenbag_scan_task._lock = _lock
+    with _lock:
+        from backend.services.tenbag_scan_service import run_scan
+        log_message("开始每日十倍股扫描...")
+        try:
+            result = run_scan()
+            log_message(
+                f"十倍股扫描完成: scanned={result.get('scanned')} "
+                f"failed={result.get('failed')} tiers={result.get('tiers')}"
+            )
+        except Exception as e:
+            logger.error(f"每日十倍股扫描失败: {e}", exc_info=True)
+            log_message(f"每日十倍股扫描失败: {e}")
+            raise
 
 
 @track_run("daily_top_picks")
@@ -457,6 +485,7 @@ _TASK_FUNCS = {
     "daily_update_task": daily_update_task,
     "daily_sentiment_task": daily_sentiment_task,
     "daily_vix_task": daily_vix_task,
+    "daily_tenbag_scan_task": daily_tenbag_scan_task,
     "daily_top_picks_task": daily_top_picks_task,
     "daily_indicators_recompute_task": daily_indicators_recompute_task,
     "zhihu_check_task": zhihu_check_task,

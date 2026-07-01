@@ -51,6 +51,7 @@ from backend.api.routes.scheduler import scheduler_bp
 from backend.api.routes.tasks import tasks_bp
 from backend.api.routes.financial import financial_bp
 from backend.api.routes.stock_dashboard import dashboard_bp
+from backend.api.routes.tenbag import tenbag_bp
 from backend.services.scheduler import init_scheduler
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,7 @@ def create_app() -> Flask:
     app.register_blueprint(tasks_bp)
     app.register_blueprint(financial_bp)
     app.register_blueprint(dashboard_bp)
+    app.register_blueprint(tenbag_bp)
     init_stock_cache()  # 预加载股票名称缓存，避免首次搜索卡顿
 
     # dev 模式：自动拉起 Vite 子进程，实现「改源码即热更新」

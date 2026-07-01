@@ -1739,6 +1739,38 @@ VIX 2.0 = 用机器学习从历史学到「哪些因子、以多大权重，最�
 
 **口径约束**：v7.0 / VIX2 重定向版均只作为“市场情绪/风险位置参考”展示，不得显示为确定性买卖信号；`vix_vol_risk_score`（10/20 日波动率风险预算）保持独立、不与此情绪指数混用。
 
+## 11H. VIX 算法 v8 — 大小盘分离 + 未来因子修复 + VIX2 walk-forward OOS（2026-07-01）
+
+**背景**：v6.1 经审计存在两类问题：(1) 回填历史时 RV / 融资融券 / Z-Score 不按目标日截断，引入未来因子，污染历史 composite 曲线；(2) composite 把情绪面（期权 IV/PCR/融资/涨跌停）与现货价格面合成一条线，掩盖了大小盘情绪分化。v8 一次性修复。
+
+**1. 未来因子（look-ahead）修复**：
+- `fetch_index_daily` / `fetch_index_daily_tx` 新增 `as_of` 参数，回填历史日 d 时截断到 `date <= d`，RV/现货信号全部 point-in-time。
+- `fetch_margin_balance` 新增 `as_of`，按日期列取 `<= d` 的最后一行（旧实现永远取今天 `iloc[-1]`）。
+- Z-Score / 百分位改用 PIT DB helper：`get_vix_column_before(date_str, col, days)` 取 `date < d` 的历史，`get_vix_latest_before(date_str)` 取前一交易日（融资融券环比）。实时路径（今日）等价取最近 N 行，回填路径严格不含未来。
+- `recompute_percentiles` 改为按「该行及之前 window 个交易日」point-in-time 全表重算两条轨道百分位。
+
+**2. 大小盘分离（废弃 composite 合成）**：
+- 废弃 `composite = 0.6·FG + 0.4·spot`。改为两条独立轨道：
+  - **大盘轨道**：50ETF + 300ETF QVIX + 沪深300 RV + 沪深300 现货
+  - **小盘轨道**：500ETF + 创业板 + 科创50 QVIX + 中证1000 RV + 中证1000 现货
+- 每条轨道各自 `VIX / Z-Score / FG(纯 cap 信号) / percentile / regime`。`compute_track_fg` 仅用 IV 水平(Z) + IV 变化率 + IV 跨标的振幅 + RV 变化（权重 0.45/0.15/0.10/0.30）。
+- PCR / 融资融券 / 涨跌停 是全市场信号，无法区分大小盘，降级为参考展示，不再进 FG。现货位置分（`large_spot_score`/`small_spot_score`）单独展示，不再参与 FG。
+- 新增列（vix_history）：`large_vix/large_zscore/large_fg/large_percentile/large_regime/large_rv/large_spot_score` + 对应 `small_*`。旧 `composite_*`/`fear_greed`/`vix` 字段保留并 alias 到大盘轨道，保证旧前端/仪表盘不崩。
+- `fetch_multi_etf_qvix` 新增 `large/small/large_prev/large_prev2/small_prev/small_prev2/large_swing/small_swing` 输出。
+- 前端 `VixTrendChart` 改为同屏绘 6 条线（大盘/小盘 × VIX/FG/百分位）。
+
+**3. VIX 2.0 walk-forward OOS 回填（修复 in-sample 回放）**：
+- 旧 `backfill_vix2` 用 final 模型（全量含目标日标签训练过）回填，历史曲线对训练期 in-sample，不能当实盘表现。
+- 新 `backfill_vix2_walkforward`（`POST /api/vix2/backfill_walkforward`）：按 60 交易日分块，每块用「块首日前一天」之前的数据训练 Ridge 真值模型（`train_truth_at_cutoff`，每块独立 TimeSeriesSplit 选 alpha），推断整块。truth 标签是 trailing 派生（无未来），故 cutoff 即严格 OOS。
+- 新增列（vix2_history）：`fear_truth/truth_percentile/truth_model_version/truth_train_cutoff`。`truth_train_cutoff` 标注该点模型最后见到的训练日，便于审计。
+- 前端新增 `Vix2TrendChart`：绘制 walk-forward OOS 真值分（主曲线）+ 滚动百分位 + 旧 in-sample 分（虚线对照），tooltip 显示训练截止日。VixView「OOS 回填」按钮触发。
+
+**4. 根线含义（v8 后）**：
+- **VIX**：单条轨道的代表性加权 QVIX 水平（期权市场定价的前瞻波动预期）。
+- **FG**：纯 cap 信号融合分（IV 水平/变化/振幅 + RV 变化），0-100。
+- **percentile**：该轨道 FG 在过去 252 日的 point-in-time 百分位，消除绝对值漂移，驱动 5 档 regime。
+- （composite 已废弃；现货位置分作为参考线单独展示。）
+
 ## 11. 舆情标题真实性审计（v1, 2026-06-04）
 
 ### 11.1 目标
@@ -3669,6 +3701,23 @@ akshare 抓取（EM 接口，2026-07-01 demo 实测）：`fetch_balance_sheet_em
 
 `classify_pool(trend_signals, anomaly_signals, industry_signals=None) -> {tier, reasons}` 纯函数，确定性规则分层：一级（≥3 正向异动+无风险+趋势确认）、二级（趋势确认+1-2 萌芽异动，或 ≥3 异动+横盘）、三级（概念强+财务弱）、排除（破位+无异动，或全无信号）。industry_signals 为 M3 预留（高景气加成）。
 
+### 19.5.2 扫描编排（`backend/services/tenbag_scan_service.py`）
+
+`run_scan(task_runner, top_n=50, snapshot_date)` 编排：取候选池（`get_latest_top_picks`）→ 逐只 `_scan_single`（趋势→异动→分层→落库 `tenbag_trend_signals`/`tenbag_anomaly_signals`/`tenbag_pools`）→ 返回 `{scanned, failed, tiers}`。TaskRunner 提供进度/取消；单只失败隔离不中断。`_latest_report_date` 兼容升序/降序输入取最近报告期。
+
+### 19.5.3 API 端点（`backend/api/routes/tenbag.py`，蓝图 `tenbag_bp`）
+
+| Method | Path | 说明 | 认证 |
+|--------|------|------|------|
+| POST | `/api/tenbag/scan` | 触发扫描（异步 TaskRunner，body `{top_n}`，返回 task_id）；防重（tenbag_scan 已运行则 409） | 是 |
+| GET | `/api/tenbag/pools?tier=&date=` | 分层结果列表（默认最新快照） | 是 |
+| GET | `/api/tenbag/signals/<symbol>` | 单股趋势+异动信号详情 | 是 |
+| GET | `/api/tenbag/health` | 生产线健康（最近快照/各 tier 数量/最近任务） | 是 |
+
+### 19.5.4 调度任务
+
+`scheduler.py` 新增 `daily_tenbag_scan_task`（`@track_run("daily_tenbag_scan")` + 函数级锁防自重叠），工作日 17:00 跑 `run_scan()`（候选 top50，长任务~2h）。注册于 `_TASK_FUNCS` + `scheduler_config_service.JOB_REGISTRY`（cron 17:00 mon-fri，`seed_from_env` 幂等写入）。调度路径 kind=`daily_tenbag_scan`（手动路径 kind=`tenbag_scan`，与 vix `daily_vix`/`vix_recompute` 双 kind 惯例一致）。
+
 ### 19.6 数据拉取接口「demo 实测先行」闸门
 
 每个新建数据/PDF/LLM 拉取接口，集成前必须先写 `scripts/demo_tenbag_*.py` 实测交用户 review。已通过：腾讯日 K、EM 资产负债表、EM 现金流。待测：巨潮资讯 cninfo 年报 PDF、MiniMax M3 结构化提取（Step 6）。
@@ -3685,7 +3734,7 @@ EM 财报接口逐期抓取，单只 2-3 分钟，全市场不可行。MVP：候
 | 1 | 模块二趋势分析器 TDD + demo | ✅ |
 | 2 | 异动定量信号 TDD + demo | ✅ |
 | 3 | 分层器 TDD | ✅ |
-| 4 | API + 异步任务 + 调度 | 待 |
+| 4 | API + 异步任务 + 调度 | ✅ |
 | 5 | 前端页面 | 待 |
 | 6 | M1 PDF 解析器（demo 实测 cninfo+MiniMax） | 待 |
 | 7 | M3 行业景气 | 待 |

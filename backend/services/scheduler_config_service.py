@@ -61,6 +61,14 @@ JOB_REGISTRY: list[dict[str, Any]] = [
         "env_fields": lambda: dict(hour=16, minute=30, day_of_week="mon-fri"),
     },
     {
+        "job_id": "daily_tenbag_scan",
+        "display_name": "十倍股/财报异动扫描",
+        "description": "工作日 17:00 跑热门股 top50 趋势+异动+分层（长任务~2h）",
+        "trigger_type": "cron",
+        "func_name": "daily_tenbag_scan_task",
+        "env_fields": lambda: dict(hour=17, minute=0, day_of_week="mon-fri"),
+    },
+    {
         "job_id": "daily_top_picks",
         "display_name": "热门股池刷新",
         "description": "工作日 16:05 拉东方财富 top 100 成交额",
