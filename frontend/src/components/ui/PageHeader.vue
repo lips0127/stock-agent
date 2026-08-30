@@ -52,11 +52,7 @@ defineProps({
   justify-content: center;
   font-size: 22px;
   line-height: 1;
-  box-shadow: inset 0 0 0 1px rgba(79, 70, 229, 0.08);
-  transition: transform var(--duration-page) var(--ease);
-}
-.page-header__icon:hover {
-  transform: scale(1.04);
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.08);
 }
 
 .page-header__main {

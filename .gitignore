@@ -2,6 +2,7 @@
 *.db
 tencent_key
 __pycache__/
+.pytest_cache/
 *.pyc
 logs/
 venv/

@@ -1,4 +1,4 @@
-"""VIX 恐慌指数 + 恐惧贪婪综合指数 API（v2, 2026-06-10 — TaskRunner 重构）"""
+"""VIX 观察、历史与探索性描述研究 API。"""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def get_vix_history_route():
 @vix_bp.route("/factor-study", methods=["GET"])
 @login_required
 def get_vix_factor_study_route():
-    """VIX/恐惧贪婪因子事件研究。query: days=365"""
+    """探索性描述事件研究（非交易信号）。query: days=365"""
     try:
         days = int(request.args.get("days", 365))
     except (TypeError, ValueError):
@@ -61,7 +61,7 @@ def get_vix_factor_study_route():
 @vix_bp.route("/vol-risk", methods=["GET"])
 @login_required
 def get_vix_vol_risk_route():
-    """VIX 波动率风险预算因子（只读生产候选，不是买卖信号）。"""
+    """当前 QVIX 相对过去窗口的分位（实验性、非预测、非仓位建议）。"""
     force = request.args.get("force") in {"1", "true", "yes"}
     return jsonify(get_vix_vol_risk_api(force=force))
 
@@ -82,14 +82,16 @@ def recompute_vix():
 
     def _run():
         with TaskRunner(kind="vix_recompute", title="VIX 重算", task_id=task_id) as t:
-            snap = compute_and_store()
+            # progress/task_runner 直通 compute_and_store：各阶段 milestone 会写
+            # task_runs（current_step / 日志），前端 /api/tasks/<id> 可见真实进展。
+            snap = compute_and_store(progress=lambda step: t.milestone(step), task_runner=t)
             if snap:
                 t.complete(result={
                     "date": snap.date,
                     "vix": snap.vix,
-                    "fear_greed": snap.fear_greed,
-                    "composite_score": snap.composite_score,
-                    "composite_regime": snap.composite_regime,
+                    "fear_greed_v7": snap.fear_greed_v7,
+                    "large_fg": snap.large_fg,
+                    "small_fg": snap.small_fg,
                 })
             else:
                 t.fail("compute_and_store 返回 None")

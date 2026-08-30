@@ -35,8 +35,7 @@ def _setup_temp_db() -> str:
 def _create_flask_client():
     from backend.api.app import create_app
     from backend.api.middleware import generate_token
-    app = create_app()
-    app.config["TESTING"] = True
+    app = create_app(testing=True)
     client = app.test_client()
     token = generate_token("test_user")
     client.environ_base["HTTP_AUTHORIZATION"] = f"Bearer {token}"

@@ -1,32 +1,29 @@
 <template>
-  <ModernCard title="大盘指数" description="实时行情（新浪接口）">
-    <div v-loading="loading" class="indices-grid">
-      <template v-if="indices.length">
-        <div
-          v-for="idx in indices"
-          :key="idx.symbol"
-          :class="['index-item', idx.change_pct >= 0 ? 'is-up' : 'is-down']"
-        >
-          <div class="index-name">{{ idx.name || idx.symbol }}</div>
-          <div class="index-value">{{ formatValue(idx.value) }}</div>
-          <div class="index-change">
-            <span class="change-arrow">{{ idx.change_pct >= 0 ? '▲' : '▼' }}</span>
-            {{ formatChange(idx.change_pct) }}
-          </div>
+  <!-- 纯网格：卡片外壳由父级 ModernCard 提供，避免双重嵌套 -->
+  <div v-loading="loading" class="indices-grid">
+    <template v-if="indices.length">
+      <div
+        v-for="idx in indices"
+        :key="idx.symbol"
+        :class="['index-item', idx.change_pct >= 0 ? 'is-up' : 'is-down']"
+      >
+        <div class="index-name">{{ idx.name || idx.symbol }}</div>
+        <div class="index-value">{{ formatValue(idx.value) }}</div>
+        <div class="index-change">
+          <span class="change-arrow">{{ idx.change_pct >= 0 ? '▲' : '▼' }}</span>
+          {{ formatChange(idx.change_pct) }}
         </div>
-      </template>
-      <EmptyHint
-        v-else-if="!loading"
-        icon="∅"
-        title="暂无指数数据"
-        description="等待定时任务拉取，或点击右上角刷新"
-      />
-    </div>
-  </ModernCard>
+      </div>
+    </template>
+    <EmptyHint
+      v-else-if="!loading"
+      title="暂无指数数据"
+      description="等待定时任务拉取，或点击右上角刷新"
+    />
+  </div>
 </template>
 
 <script setup>
-import ModernCard from './ui/ModernCard.vue'
 import EmptyHint from './ui/EmptyHint.vue'
 
 defineProps({
@@ -61,7 +58,6 @@ function formatChange(pct) {
 }
 .index-item:hover {
   background: var(--color-bg-muted);
-  transform: translateY(-1px);
 }
 .index-item.is-up { border-left-color: var(--color-up); }
 .index-item.is-down { border-left-color: var(--color-down); }
@@ -74,6 +70,7 @@ function formatChange(pct) {
   letter-spacing: 0.02em;
 }
 .index-value {
+  font-family: var(--font-mono);
   font-size: var(--text-2xl);
   font-weight: var(--weight-semibold);
   color: var(--color-text-primary);
@@ -82,6 +79,7 @@ function formatChange(pct) {
   font-variant-numeric: tabular-nums;
 }
 .index-change {
+  font-family: var(--font-mono);
   font-size: var(--text-sm);
   margin-top: 4px;
   font-weight: var(--weight-medium);

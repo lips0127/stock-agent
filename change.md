@@ -1,5 +1,32 @@
 # Change Log
 
+## 2026-08-30
+
+### 产品收敛日：能力下线、新功能、安全部署与口径修复（main）
+
+一次性收敛多线工作，`docs/SPEC.md` 同步重写为当前产品唯一事实源（能力分层 Core/Beta/Experimental/Removed 与各域契约）。
+
+**知乎监控下线（Removed）**：
+- 删除 `backend/api/routes/zhihu.py`、`backend/services/zhihu_{analyzer,service}.py`、`backend/services/email_service.py`、前端 `ZhihuMonitorView`/`ZhihuTimelineView` 及路由、`task_kinds.py` 知乎任务、调度与相关测试。原因：知乎反爬对作者动态接口确定性 403，免 cookie 通道不可行，维护成本与价值不成比例（SPEC §5）。
+
+**自选股观察池（Core）**：
+- 新增 `backend/api/routes/watchlist.py`、`backend/services/watchlist_service.py`、`frontend/src/views/WatchlistView.vue`；`/api/watchlist` CRUD + 带可信元数据的报价聚合，单独校验 JWT 边界（`tests/test_market_auth.py` 等）。
+
+**VIX 大小盘拆分轨道（Beta）**：
+- 新增 `backend/services/fear_greed_tracks.py`：上证50/沪深300/中证500/创业板/科创50 五条轨道，各轨道 IV 锚与价格同源；regime 一律按 trailing 252 日滚动百分位划分（point-in-time），落库 `vix_track_history`。
+
+**安全与部署加固**：
+- 新增 `backend/security_check.py`（生产就绪审计 CLI，entrypoint 强制执行）、安全响应头（CSP/HSTS）、登录限流；`.env.production.example` + `docs/DEPLOY.md` + 单容器三阶段构建（`backend/Dockerfile`，镜像内编译前端）；删除旧 `deploy/` 三件套；新增 GitHub Actions 质量门禁（`.github/workflows/quality.yml`）与 `requirements-dev.txt`、`scripts/verify.ps1`。
+
+**前端视觉系统重构（2026-08-30）**：
+- `frontend/src/styles/design-system.css` token 为唯一事实源：单一强调色、zinc 中性灰、等宽数字、克制动效；全部视图/组件迁移到新 token，新增 `ErrorState.vue`，删除 `GradientBlob.vue`。不改路由、接口与数据语义。
+
+**股息率口径修复（fix）**：
+- `stock_service.get_stock_metrics` 新增 400 天分红时效闸门：停发分红公司（振东制药 2021 年 10 派 27、万科 A FY2022 后停发等）的远古分红不得除以现价冒充当前股息率，修复仪表盘高股息榜 20%-60%+ 假股息率；口径与时点规则写入 SPEC §3.5；回归脚本 `scripts/test_dividend_sources.py`。实测：异常股归零，茅台 4.01%/神华 4.22%/双汇 5.83% 正常。
+
+**现场治理**：
+- 删除根目录 QA 截图（`*.png`）、`vr-test.js`、`scripts/debug_zhihu_pins.py`、旧日志与 ACL 损坏的 `.pytest_cache/`（已加入 `.gitignore`）。
+
 ## 2026-07-01
 
 ### 十倍股/财报异动扫描器 — Step 0~2（feature/tenbag-scanner）

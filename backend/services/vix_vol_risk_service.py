@@ -1,7 +1,7 @@
-"""VIX 波动率风险预算因子（生产候选）。
+"""QVIX 当前值相对过去窗口的位置（实验性只读统计）。
 
-输出用于仓位上限/风险预算，不用于买卖方向判断。当前生产候选先采用
-稳健性验证最稳定的 QVIX 252日 percentile：越高表示未来 10/20 日实现波动率风险越高。
+分数仅表示当前 QVIX 在 trailing window 内的经验分位，不预测未来波动，
+也不提供仓位、杠杆、买卖或风险预算动作建议。
 """
 from __future__ import annotations
 
@@ -22,70 +22,46 @@ def _risk_level(score: float) -> dict:
     if score >= 80:
         return {
             "level": "very_high",
-            "label": "极高波动风险",
+            "label": "当前 QVIX 历史分位极高",
             "tone": "danger",
-            "suggested_equity_max": 0.3,
-            "message": "未来波动率风险处于历史高位，适合作为降低权益仓位或杠杆上限的提示。",
+            "message": "当前 QVIX 高于过去窗口中的大多数观测值。",
         }
     if score >= 60:
         return {
             "level": "high",
-            "label": "偏高波动风险",
+            "label": "当前 QVIX 历史分位偏高",
             "tone": "warning",
-            "suggested_equity_max": 0.6,
-            "message": "未来波动率风险偏高，建议控制新增风险暴露并收紧仓位预算。",
+            "message": "当前 QVIX 位于过去窗口的较高分位。",
         }
     if score <= 20:
         return {
             "level": "very_low",
-            "label": "极低波动风险",
+            "label": "当前 QVIX 历史分位极低",
             "tone": "success",
-            "suggested_equity_max": 1.0,
-            "message": "未来波动率风险处于历史低位，但这不代表收益 alpha 或买入信号。",
+            "message": "当前 QVIX 低于过去窗口中的大多数观测值。",
         }
     if score <= 40:
         return {
             "level": "low",
-            "label": "偏低波动风险",
+            "label": "当前 QVIX 历史分位偏低",
             "tone": "success",
-            "suggested_equity_max": 1.0,
-            "message": "未来波动率风险偏低，可按原策略仓位预算执行。",
+            "message": "当前 QVIX 位于过去窗口的较低分位。",
         }
     return {
         "level": "neutral",
-        "label": "中性波动风险",
+        "label": "当前 QVIX 历史分位居中",
         "tone": "info",
-        "suggested_equity_max": 0.8,
-        "message": "未来波动率风险处于中性区间，仓位应主要由原策略信号决定。",
+        "message": "当前 QVIX 位于过去窗口的中部分位。",
     }
 
 
 def _validation_summary() -> dict:
     return {
-        "status": "candidate",
-        "not_alpha": True,
-        "default_horizon": 20,
-        "production_scope": "risk_budget_only",
-        "baseline_qvix": {
-            "targets": ["上证综指", "沪深300"],
-            "horizons_passed": [10, 20],
-            "horizon_failed": [60],
-            "sh_h20_rank_ic": 0.3369,
-            "sh_h20_block_positive_frac": 1.0,
-            "sh_h20_top_bottom_vol_spread_pct": 3.69,
-            "hs300_h20_rank_ic": 0.3498,
-            "hs300_h20_block_positive_frac": 1.0,
-            "hs300_h20_top_bottom_vol_spread_pct": 4.05,
-        },
-        "core_xmkt_linear_research": {
-            "status": "research_validated_not_served_live_yet",
-            "reason": "需要离线训练/落盘后再作为线上模型；当前 API 先使用更稳定且可解释的 QVIX percentile 基线。",
-            "sh_h20_rank_ic": 0.1898,
-            "sh_h20_block_positive_frac": 1.0,
-            "sh_h20_10bps_sharpe": 0.64,
-            "sh_h20_10bps_buy_hold_sharpe": 0.40,
-        },
-        "caveat": "这是未来波动率风险提示和仓位上限参考，不是买入、卖出或收益预测信号。",
+        "status": "experimental",
+        "evidence_status": "legacy_evidence_not_independently_revalidated",
+        "not_a_forecast": True,
+        "not_position_advice": True,
+        "caveat": "该分位只描述当前值相对过去窗口的位置，不预测未来波动，也不构成仓位或买卖建议。",
     }
 
 
@@ -113,20 +89,7 @@ def _latest_score_from_vix_history() -> Optional[dict]:
         "qvix_percentile_window": int(len(recent)),
         "data_source": "vix_history.vix",
         "risk_level": level,
-        "position_rule": _position_rule(),
         "validation": _validation_summary(),
-    }
-
-
-def _position_rule() -> dict:
-    return {
-        "name": "q60_40_baseline",
-        "high_risk_threshold": 60,
-        "low_risk_threshold": 40,
-        "high_risk_equity_max": 0.6,
-        "very_high_risk_equity_max": 0.3,
-        "neutral_equity_max": 0.8,
-        "low_risk_equity_max": 1.0,
     }
 
 
@@ -151,7 +114,6 @@ def _latest_score_from_core_features() -> Optional[dict]:
         "qvix_percentile_window": int(len(recent)),
         "data_source": "vix2_core_features.qvix_50",
         "risk_level": level,
-        "position_rule": _position_rule(),
         "validation": _validation_summary(),
     }
 
@@ -165,14 +127,18 @@ def get_vix_vol_risk_api(force: bool = False) -> dict:
     if latest is None:
         payload = {
             "status": "insufficient_data",
-            "message": "缺少足够 QVIX 长历史，暂不能计算波动率风险因子。",
+            "factor": "qvix_trailing_percentile",
+            "orientation": "current_value_relative_to_trailing_window",
+            "message": "缺少足够 QVIX 历史，暂不能计算当前值的 trailing percentile。",
             "validation": _validation_summary(),
         }
     else:
         payload = {
             "status": "ok",
-            "factor": "vix_vol_risk_score",
-            "orientation": "higher_score_means_higher_future_volatility_risk",
+            "factor": "qvix_trailing_percentile",
+            "orientation": "higher_score_means_higher_current_qvix_relative_to_trailing_window",
+            "not_a_forecast": True,
+            "not_position_advice": True,
             "latest": latest,
         }
     _CACHE = (now, payload)

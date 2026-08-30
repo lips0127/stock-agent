@@ -24,10 +24,18 @@ def _get_db_path():
 
 @contextmanager
 def get_connection():
-    """获取 SQLite 连接，使用后自动提交。"""
-    conn = sqlite3.connect(_get_db_path())
+    """获取 SQLite 连接，使用后自动提交。
+
+    busy_timeout 是 per-connection PRAGMA，只在 init_db 的连接上设置对
+    运行期新建连接无效；调度任务与 Web 请求并发写库时，没有它会立刻抛
+    "database is locked"。因此每个连接都必须带上等待窗口。
+    """
+    conn = sqlite3.connect(_get_db_path(), timeout=5.0)
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        # WAL 下 NORMAL 是推荐的持久化/性能平衡点
+        conn.execute("PRAGMA synchronous=NORMAL")
         yield conn
         conn.commit()
     except Exception as e:
@@ -88,6 +96,20 @@ def init_db():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sdm_date ON stock_daily_metrics(date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_sdm_code_date ON stock_daily_metrics(code, date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mi_date ON market_indices(date)")
+
+        # 自选股观察池（Core）：个人研究关注列表，单用户产品不设用户隔离
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL,
+                name TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(code)
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_watchlist_sort ON watchlist(sort_order, id)")
 
         _create_default_admin(conn)
 
@@ -251,86 +273,6 @@ def init_db():
         except sqlite3.OperationalError:
             pass  # 列已存在
 
-        # ── 知乎大V监控表 ──────────────────────────────
-
-        cur.execute("CREATE TABLE IF NOT EXISTS zhihu_users ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    "url_token TEXT UNIQUE NOT NULL,"
-                    "display_name TEXT,"
-                    "avatar_url TEXT,"
-                    "headline TEXT,"
-                    "follower_count INTEGER DEFAULT 0,"
-                    "enabled INTEGER DEFAULT 1,"
-                    "email_notify INTEGER DEFAULT 1,"
-                    "last_checked_at TIMESTAMP,"
-                    "last_notified_at TIMESTAMP,"
-                    "last_error TEXT,"
-                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_zhihu_users_enabled ON zhihu_users(enabled)")
-
-        cur.execute("CREATE TABLE IF NOT EXISTS zhihu_posts ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    "url_token TEXT NOT NULL,"
-                    "post_id TEXT NOT NULL,"
-                    "post_type TEXT NOT NULL,"
-                    "title TEXT,"
-                    "excerpt TEXT,"
-                    "content_text TEXT,"
-                    "url TEXT UNIQUE,"
-                    "voteup_count INTEGER DEFAULT 0,"
-                    "comment_count INTEGER DEFAULT 0,"
-                    "created_at_original TIMESTAMP,"
-                    "fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_zhp_token_time ON zhihu_posts(url_token, created_at_original DESC)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_zhp_post_id ON zhihu_posts(post_id)")
-
-        cur.execute("CREATE TABLE IF NOT EXISTS zhihu_analyses ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    "post_id TEXT NOT NULL,"
-                    "url_token TEXT NOT NULL,"
-                    "stance TEXT,"
-                    "stance_assets TEXT,"
-                    "sectors TEXT,"
-                    "summary TEXT,"
-                    "action_suggestion TEXT,"
-                    "key_points TEXT,"
-                    "confidence INTEGER DEFAULT 50,"
-                    "raw_response TEXT,"
-                    "model_name TEXT,"
-                    "analyzed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
-                    "UNIQUE(post_id))")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_zha_token ON zhihu_analyses(url_token)")
-
-        cur.execute("CREATE TABLE IF NOT EXISTS zhihu_email_subscriptions ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    "email TEXT UNIQUE NOT NULL,"
-                    "url_tokens TEXT DEFAULT '[]',"
-                    "enabled INTEGER DEFAULT 1,"
-                    "verified INTEGER DEFAULT 0,"
-                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-
-        cur.execute("CREATE TABLE IF NOT EXISTS zhihu_email_log ("
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                    "email TEXT NOT NULL,"
-                    "subject TEXT,"
-                    "url_token TEXT,"
-                    "post_ids TEXT,"
-                    "status TEXT NOT NULL,"
-                    "error_message TEXT,"
-                    "sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_zhel_email ON zhihu_email_log(email, sent_at DESC)")
-
-        # SMTP 配置表（单行，id=1）
-        cur.execute("CREATE TABLE IF NOT EXISTS zhihu_smtp_settings ("
-                    "id INTEGER PRIMARY KEY CHECK(id = 1),"
-                    "smtp_host TEXT,"
-                    "smtp_port INTEGER DEFAULT 465,"
-                    "smtp_user TEXT,"
-                    "smtp_password TEXT,"
-                    "smtp_from TEXT,"
-                    "smtp_use_ssl INTEGER DEFAULT 1,"
-                    "updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-
         # ── VIX 恐慌指数 + 恐惧贪婪综合指数 日频快照（v3, 2026-06-04） ──
         cur.execute("CREATE TABLE IF NOT EXISTS vix_history ("
                     "date TEXT PRIMARY KEY,"
@@ -390,7 +332,7 @@ def init_db():
             except sqlite3.OperationalError:
                 pass  # 列已存在
 
-        # 迁移：v7.0 construct-truth 恐惧贪婪（2026-06-29）
+        # 迁移：v7.0 人工构造状态分（恐惧/贪婪口径，2026-06-29）
         # 与 v6.1 fear_greed 并存，同屏对比；fear_truth_v7=100 最恐，fear_greed_v7=100 最贪
         for col, ddl in [
             ("fear_truth_v7",      "REAL"),
@@ -405,6 +347,66 @@ def init_db():
                 cur.execute(f"ALTER TABLE vix_history ADD COLUMN {col} {ddl}")
             except sqlite3.OperationalError:
                 pass  # 列已存在
+
+        # 迁移：v8 大盘/小盘分离轨道（2026-07-01）—— 废弃 composite 合成，改为两条
+        # 独立轨道各自 VIX/FG/percentile/regime + Z-Score。PCR/融资/涨跌停降级为全市场
+        # 参考信号，不再进 FG。现货信号按 HS300(大盘)/ZZ1000(小盘) 各自存储。
+        for col, ddl in [
+            ("large_vix",        "REAL"),
+            ("large_zscore",     "REAL"),
+            ("large_fg",         "REAL"),
+            ("large_percentile", "REAL"),
+            ("large_regime",     "TEXT"),
+            ("large_rv",         "REAL"),
+            ("large_spot_score", "REAL"),
+            ("small_vix",        "REAL"),
+            ("small_zscore",     "REAL"),
+            ("small_fg",         "REAL"),
+            ("small_percentile", "REAL"),
+            ("small_regime",     "TEXT"),
+            ("small_rv",         "REAL"),
+            ("small_spot_score", "REAL"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE vix_history ADD COLUMN {col} {ddl}")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+
+        # 迁移：恐慌贪婪指数（v7 口径单一主指标，2026-08-30）。fg7_percentile 为
+        # fear_greed_v7 的近 252 日滚动百分位（point-in-time），regime 按百分位 5 档。
+        for col, ddl in [
+            ("fg7_percentile", "REAL"),
+            ("fg7_regime",     "TEXT"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE vix_history ADD COLUMN {col} {ddl}")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+
+        # ── 大小盘拆分轨道（2026-08-30）──
+        # 五条单指数轨道（sh50 上证50 / hs300 沪深300 / zz500 中证500 /
+        # zz1000 中证1000 / zz2000 中证2000）各自复用 v7 构造真实情绪分：
+        # drawdown=该指数距 60 日高点回撤，breadth=全市场跌停广度（共享），
+        # iv_surge/iv_level 仅 50/300/500 有对应场内期权 QVIX 时参与。
+        # greed = 100 - fear；percentile 为 trailing 252 日 point-in-time 百分位。
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS vix_track_history (
+                date TEXT NOT NULL,
+                track TEXT NOT NULL,
+                fear REAL,
+                greed REAL,
+                percentile REAL,
+                regime TEXT,
+                drawdown REAL,
+                breadth REAL,
+                iv_surge REAL,
+                iv_level REAL,
+                uptrend INTEGER,
+                breadth_available INTEGER,
+                computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (date, track)
+            )
+        """)
 
         # ── 全市场舆情观测台（v4, 2026-06-06）──
         # 5 张新表：sentiment_universe_indices / constituents / jobs / scores / aggregates
@@ -615,6 +617,22 @@ def init_db():
             computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )""")
 
+        # 迁移：v8.1 VIX2 walk-forward 构造状态回归分（2026-07-01）
+        # fear_truth = 人工构造状态分的 walk-forward 回归推断（每点只用该日之前
+        # 数据训练的模型），是按时间顺序的实验状态估计曲线；train_cutoff 标注该点模型最后见到的
+        # 训练日，便于审计。旧 score 列（final 模型 in-sample 回放）保留但不再主推。
+        for col, ddl in [
+            ("fear_truth",          "REAL"),
+            ("truth_percentile",    "REAL"),
+            ("truth_regime",        "TEXT"),
+            ("truth_model_version", "TEXT"),
+            ("truth_train_cutoff",  "TEXT"),
+        ]:
+            try:
+                cur.execute(f"ALTER TABLE vix2_history ADD COLUMN {col} {ddl}")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
+
         cur.execute("""CREATE TABLE IF NOT EXISTS report_parse_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             report_text_hash TEXT NOT NULL,
@@ -699,10 +717,15 @@ def upsert_vix_history(date: str, payload: dict) -> None:
         "spot_new_high_ratio", "composite_score", "composite_regime",
         # v5: composite 滚动百分位（2026-06-09）
         "composite_percentile",
-        # v7.0: construct-truth 恐惧贪婪（2026-06-29）
+        # v7.0: 人工构造状态分（恐惧/贪婪口径，2026-06-29）
         "fear_truth_v7", "fear_greed_v7",
         "comp_drawdown_v7", "comp_breadth_v7", "comp_iv_surge_v7", "comp_iv_level_v7",
         "regime_v7",
+        # v8: 大小盘分离轨道（2026-07-01）
+        "large_vix", "large_zscore", "large_fg", "large_percentile", "large_regime",
+        "large_rv", "large_spot_score",
+        "small_vix", "small_zscore", "small_fg", "small_percentile", "small_regime",
+        "small_rv", "small_spot_score",
     )
     placeholders = ",".join("?" for _ in cols)
     col_list = ",".join(cols)
@@ -722,6 +745,34 @@ def get_vix_history_for_zscore(days: int = 252) -> list[float]:
             (days,),
         )
         return [r[0] for r in cur.fetchall() if r[0] is not None]
+
+
+def get_vix_column_before(date_str: str, column: str = "vix", days: int = 252) -> list[float]:
+    """point-in-time：取 date < date_str 的最近 N 行某列，用于回填历史日的 Z-Score /
+    百分位。实时路径（date_str=今天）等价于 get_vix_history_for_zscore，但回填时
+    必须用本函数，否则窗口会混入 > date_str 的未来行造成泄漏。
+    """
+    with get_connection() as conn:
+        cur = conn.execute(
+            f"SELECT {column} FROM vix_history "
+            f"WHERE date < ? AND {column} IS NOT NULL "
+            f"ORDER BY date DESC LIMIT ?",
+            (date_str, days),
+        )
+        return [r[0] for r in cur.fetchall() if r[0] is not None]
+
+
+def get_vix_latest_before(date_str: str) -> dict | None:
+    """point-in-time：取 date < date_str 的最近一行（回填历史日时取「前一交易日」，
+    如融资融券环比）。实时路径用 get_vix_latest()。
+    """
+    with get_connection() as conn:
+        cur = conn.execute(
+            "SELECT * FROM vix_history WHERE date < ? ORDER BY date DESC LIMIT 1",
+            (date_str,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
 
 
 def get_vix_latest() -> dict | None:
@@ -776,6 +827,52 @@ def compute_vix_percentile(current_vix: float, days: int = 250) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────
+# 大小盘拆分轨道 CRUD（2026-08-30）— 独立于 vix_history 的 date+track 表
+# ─────────────────────────────────────────────────────────────────
+
+def upsert_vix_tracks(rows: list[dict]) -> int:
+    """批量写入/覆盖拆分轨道行。row 须含 date/track，其余字段可选。"""
+    if not rows:
+        return 0
+    cols = ("date", "track", "fear", "greed", "percentile", "regime",
+            "drawdown", "breadth", "iv_surge", "iv_level",
+            "uptrend", "breadth_available")
+    placeholders = ",".join("?" for _ in cols)
+    col_list = ",".join(cols)
+    with get_connection() as conn:
+        conn.executemany(
+            f"INSERT OR REPLACE INTO vix_track_history ({col_list}) VALUES ({placeholders})",
+            [tuple(r.get(c) for c in cols) for r in rows],
+        )
+    return len(rows)
+
+
+def get_vix_tracks_by_dates(dates: list[str]) -> dict[str, dict[str, dict]]:
+    """取一批日期的拆分轨道行，组织为 {date: {track: row}}。"""
+    dates = [d for d in dates if d]
+    if not dates:
+        return {}
+    with get_connection() as conn:
+        cur = conn.execute(
+            f"SELECT * FROM vix_track_history WHERE date IN ({','.join('?' for _ in dates)})",
+            dates,
+        )
+        out: dict[str, dict[str, dict]] = {}
+        for r in cur.fetchall():
+            d = dict(r)
+            out.setdefault(d["date"], {})[d["track"]] = d
+        return out
+
+
+def get_vix_track_dates() -> list[str]:
+    """拆分轨道已覆盖的全部日期（升序）。"""
+    with get_connection() as conn:
+        return [r[0] for r in conn.execute(
+            "SELECT DISTINCT date FROM vix_track_history ORDER BY date ASC"
+        ).fetchall()]
+
+
+# ─────────────────────────────────────────────────────────────────
 # VIX 2.0（机器学习）历史 CRUD（2026-06-29）— 独立于 vix_history
 # ─────────────────────────────────────────────────────────────────
 
@@ -788,9 +885,13 @@ def upsert_vix2_history(date: str, payload: dict) -> None:
         feats = _json.dumps(feats, ensure_ascii=False)
     with get_connection() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO vix2_history "
+            "INSERT INTO vix2_history "
             "(date, p_up, score, percentile, regime, model_version, features_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(date) DO UPDATE SET "
+            "p_up=excluded.p_up, score=excluded.score, "
+            "percentile=excluded.percentile, regime=excluded.regime, "
+            "model_version=excluded.model_version, features_json=excluded.features_json",
             (
                 date, payload.get("p_up"), payload.get("score"),
                 payload.get("percentile"), payload.get("regime"),
@@ -839,6 +940,42 @@ def update_vix2_percentile(date: str, percentile: float, regime: str) -> None:
     with get_connection() as conn:
         conn.execute(
             "UPDATE vix2_history SET percentile = ?, regime = ? WHERE date = ?",
+            (percentile, regime, date),
+        )
+
+
+def upsert_vix2_truth(date: str, fear_truth: float, model_version: str,
+                      train_cutoff: str) -> None:
+    """写入/更新某日 VIX2 walk-forward 构造状态回归分（不影响旧 p_up/score 列）。"""
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO vix2_history (date) VALUES (?) "
+            "ON CONFLICT(date) DO NOTHING",
+            (date,),
+        )
+        conn.execute(
+            "UPDATE vix2_history SET fear_truth = ?, truth_model_version = ?, "
+            "truth_train_cutoff = ? WHERE date = ?",
+            (fear_truth, model_version, train_cutoff, date),
+        )
+
+
+def get_vix2_truth_scores_asc() -> list[tuple]:
+    """全表 (date, fear_truth)，按日期升序，用于 point-in-time 百分位重算。"""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT date, fear_truth FROM vix2_history "
+            "WHERE fear_truth IS NOT NULL ORDER BY date ASC"
+        ).fetchall()
+        return [(r[0], float(r[1])) for r in rows]
+
+
+def update_vix2_truth_percentile(date: str, percentile: float, regime: str) -> None:
+    """持久化同日构造分拟合的滚动百分位及其解释性状态。"""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE vix2_history SET truth_percentile = ?, truth_regime = ? "
+            "WHERE date = ?",
             (percentile, regime, date),
         )
 
@@ -1680,381 +1817,6 @@ def get_latest_signals(date: str | None = None) -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
-# ── 知乎监控 CRUD ──
-
-def _extract_url_token(url_or_token: str) -> str:
-    """从 URL 或 url_token 字符串中提取 url_token。"""
-    s = (url_or_token or "").strip()
-    m = re.search(r"zhihu\.com/people/([\w-]+)", s, re.IGNORECASE)
-    if m:
-        return m.group(1)
-    return s.lstrip("@")
-
-
-def get_zhihu_users(enabled_only: bool = False) -> list:
-    """获取监控的知乎用户列表。"""
-    with get_connection() as conn:
-        cur = conn.cursor()
-        sql = "SELECT * FROM zhihu_users" + (" WHERE enabled=1" if enabled_only else "")
-        sql += " ORDER BY id DESC"
-        cur.execute(sql)
-        return [dict(r) for r in cur.fetchall()]
-
-
-def get_zhihu_user_by_token(url_token: str) -> dict | None:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM zhihu_users WHERE url_token=?", (url_token,))
-        row = cur.fetchone()
-        return dict(row) if row else None
-
-
-def add_zhihu_user(url_or_token: str, display_name: str = "",
-                   avatar_url: str = "", headline: str = "",
-                   follower_count: int = 0) -> dict | None:
-    token = _extract_url_token(url_or_token)
-    if not token:
-        return None
-    try:
-        with get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """INSERT OR IGNORE INTO zhihu_users
-                   (url_token, display_name, avatar_url, headline, follower_count, enabled)
-                   VALUES (?, ?, ?, ?, ?, 1)""",
-                (token, display_name, avatar_url, headline, follower_count),
-            )
-            cur.execute("SELECT * FROM zhihu_users WHERE url_token=?", (token,))
-            return dict(cur.fetchone())
-    except Exception as e:
-        logger.warning(f"新增知乎用户失败: {e}")
-        return None
-
-
-def update_zhihu_user(user_id: int, **kwargs) -> bool:
-    """更新 zhihu_users 字段（白名单）。"""
-    allowed = {"display_name", "avatar_url", "headline", "follower_count",
-               "enabled", "email_notify", "last_checked_at",
-               "last_notified_at", "last_error"}
-    fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
-    if not fields:
-        return False
-    sets = ", ".join(f"{k}=?" for k in fields)
-    vals = list(fields.values()) + [user_id]
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(f"UPDATE zhihu_users SET {sets} WHERE id=?", vals)
-        return cur.rowcount > 0
-
-
-def delete_zhihu_user(user_id: int) -> bool:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM zhihu_users WHERE id=?", (user_id,))
-        return cur.rowcount > 0
-
-
-def upsert_zhihu_post(url_token: str, post_id: str, post_type: str,
-                      title: str, excerpt: str, content_text: str,
-                      url: str, voteup_count: int, comment_count: int,
-                      created_at_original: str) -> tuple[bool, int]:
-    """插入知乎动态（URL 唯一），返回 (是否新增, id)。
-
-    若已存在且 content_text 为空（之前抓取失败的占位），用新内容回填。
-    """
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT OR IGNORE INTO zhihu_posts
-               (url_token, post_id, post_type, title, excerpt, content_text,
-                url, voteup_count, comment_count, created_at_original)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (url_token, post_id, post_type, title, excerpt, content_text,
-             url, voteup_count, comment_count, created_at_original),
-        )
-        inserted = cur.rowcount > 0
-        # 若新数据有正文但旧记录 content_text 为空，回填
-        if not inserted and content_text:
-            cur.execute(
-                """UPDATE zhihu_posts
-                   SET title=?, excerpt=?, content_text=?,
-                       voteup_count=?, comment_count=?, created_at_original=?
-                   WHERE url=? AND (content_text IS NULL OR content_text='')""",
-                (title, excerpt, content_text,
-                 voteup_count, comment_count, created_at_original, url),
-            )
-        cur.execute("SELECT id FROM zhihu_posts WHERE url=?", (url,))
-        row = cur.fetchone()
-        post_pk = row["id"] if row else 0
-        return inserted, post_pk
-
-
-def get_zhihu_posts(url_token: str = None, limit: int = 20) -> list:
-    """获取知乎动态（带分析结果）。"""
-    with get_connection() as conn:
-        cur = conn.cursor()
-        if url_token:
-            cur.execute(
-                """SELECT p.*, a.stance, a.stance_assets, a.sectors,
-                          a.summary, a.action_suggestion, a.key_points,
-                          a.confidence, a.analyzed_at
-                   FROM zhihu_posts p
-                   LEFT JOIN zhihu_analyses a ON a.post_id = p.post_id
-                   WHERE p.url_token=?
-                   ORDER BY p.created_at_original DESC
-                   LIMIT ?""",
-                (url_token, limit),
-            )
-        else:
-            cur.execute(
-                """SELECT p.*, a.stance, a.stance_assets, a.sectors,
-                          a.summary, a.action_suggestion, a.key_points,
-                          a.confidence, a.analyzed_at
-                   FROM zhihu_posts p
-                   LEFT JOIN zhihu_analyses a ON a.post_id = p.post_id
-                   ORDER BY p.created_at_original DESC
-                   LIMIT ?""",
-                (limit,),
-            )
-        rows = [dict(r) for r in cur.fetchall()]
-    return rows
-
-
-def _is_stock_related(stance, stance_assets, sectors) -> bool:
-    """判断 LLM 分析结果是否与股票/投资相关。
-
-    大V时间线只保留与投资相关的动态，过滤掉「中性立场 + 未提任何资产或行业」
-    的纯生活/职场/科普类内容。规则（任一满足即视为相关）：
-      1. stance 为 bullish / bearish / mixed（非中性立场）
-      2. stance_assets 非空（提到 A股/港股/美股/黄金/加密等具体资产）
-      3. sectors 非空（提到科技/金融/医药等行业）
-    """
-    if stance in ("bullish", "bearish", "mixed"):
-        return True
-    if stance_assets and len(stance_assets) > 0:
-        return True
-    if sectors and len(sectors) > 0:
-        return True
-    return False
-
-
-def get_zhihu_timeline_posts(days: int = 7) -> list:
-    """获取最近 N 天内所有大V的【已分析且与股票相关】的动态（时间升序，含用户资料）。
-
-    非股票类动态（中性立场 + 无资产/行业提及）会被过滤。
-    """
-    import json as _json
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """SELECT p.id, p.url_token, p.post_id, p.post_type, p.title,
-                      p.excerpt, p.url, p.created_at_original,
-                      p.voteup_count, p.comment_count,
-                      a.stance, a.stance_assets, a.sectors, a.summary,
-                      a.action_suggestion, a.key_points, a.confidence,
-                      a.model_name, a.analyzed_at,
-                      u.display_name, u.avatar_url
-               FROM zhihu_posts p
-               JOIN zhihu_analyses a ON a.post_id = p.post_id
-               JOIN zhihu_users u ON u.url_token = p.url_token
-               WHERE p.created_at_original >= datetime('now', '-' || ? || ' days')
-               ORDER BY p.created_at_original ASC""",
-            (days,),
-        )
-        rows = []
-        for r in cur.fetchall():
-            d = dict(r)
-            for f in ("stance_assets", "sectors", "key_points"):
-                raw = d.get(f)
-                try:
-                    d[f] = _json.loads(raw) if raw else []
-                except (_json.JSONDecodeError, TypeError):
-                    d[f] = []
-            if not _is_stock_related(d.get("stance"), d.get("stance_assets"), d.get("sectors")):
-                continue
-            rows.append(d)
-    return rows
-
-
-def get_zhihu_post_by_id(post_id: str) -> dict | None:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """SELECT p.*, a.stance, a.stance_assets, a.sectors,
-                      a.summary, a.action_suggestion, a.key_points,
-                      a.confidence, a.model_name, a.raw_response, a.analyzed_at
-               FROM zhihu_posts p
-               LEFT JOIN zhihu_analyses a ON a.post_id = p.post_id
-               WHERE p.post_id=?""",
-            (post_id,),
-        )
-        row = cur.fetchone()
-        return dict(row) if row else None
-
-
-def upsert_zhihu_analysis(post_id: str, url_token: str,
-                          stance: str, stance_assets: str,
-                          sectors: str, summary: str,
-                          action_suggestion: str, key_points: str,
-                          confidence: int, raw_response: str,
-                          model_name: str) -> int:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO zhihu_analyses
-               (post_id, url_token, stance, stance_assets, sectors, summary,
-                action_suggestion, key_points, confidence, raw_response, model_name)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(post_id) DO UPDATE SET
-                 stance=excluded.stance,
-                 stance_assets=excluded.stance_assets,
-                 sectors=excluded.sectors,
-                 summary=excluded.summary,
-                 action_suggestion=excluded.action_suggestion,
-                 key_points=excluded.key_points,
-                 confidence=excluded.confidence,
-                 raw_response=excluded.raw_response,
-                 model_name=excluded.model_name,
-                 analyzed_at=CURRENT_TIMESTAMP""",
-            (post_id, url_token, stance, stance_assets, sectors,
-             summary, action_suggestion, key_points, confidence,
-             raw_response, model_name),
-        )
-        cur.execute("SELECT id FROM zhihu_analyses WHERE post_id=?", (post_id,))
-        row = cur.fetchone()
-        return row["id"] if row else 0
-
-
-def get_zhihu_subscriptions(enabled_only: bool = False) -> list:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        sql = "SELECT * FROM zhihu_email_subscriptions"
-        if enabled_only:
-            sql += " WHERE enabled=1"
-        sql += " ORDER BY id DESC"
-        cur.execute(sql)
-        return [dict(r) for r in cur.fetchall()]
-
-
-def add_zhihu_subscription(email: str, url_tokens: str = "[]") -> dict | None:
-    email = (email or "").strip().lower()
-    if not email or "@" not in email:
-        return None
-    try:
-        with get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """INSERT OR IGNORE INTO zhihu_email_subscriptions
-                   (email, url_tokens, enabled) VALUES (?, ?, 1)""",
-                (email, url_tokens),
-            )
-            cur.execute("SELECT * FROM zhihu_email_subscriptions WHERE email=?", (email,))
-            return dict(cur.fetchone())
-    except Exception as e:
-        logger.warning(f"新增邮件订阅失败: {e}")
-        return None
-
-
-def update_zhihu_subscription(sub_id: int, **kwargs) -> bool:
-    allowed = {"url_tokens", "enabled", "verified"}
-    fields = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
-    if not fields:
-        return False
-    sets = ", ".join(f"{k}=?" for k in fields)
-    vals = list(fields.values()) + [sub_id]
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(f"UPDATE zhihu_email_subscriptions SET {sets} WHERE id=?", vals)
-        return cur.rowcount > 0
-
-
-def delete_zhihu_subscription(sub_id: int) -> bool:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM zhihu_email_subscriptions WHERE id=?", (sub_id,))
-        return cur.rowcount > 0
-
-
-def get_zhihu_smtp_settings() -> dict | None:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM zhihu_smtp_settings WHERE id=1")
-        row = cur.fetchone()
-        return dict(row) if row else None
-
-
-def save_zhihu_smtp_settings(host: str, port: int, user: str,
-                             password: str, smtp_from: str,
-                             use_ssl: int) -> bool:
-    try:
-        with get_connection() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """INSERT INTO zhihu_smtp_settings
-                   (id, smtp_host, smtp_port, smtp_user, smtp_password,
-                    smtp_from, smtp_use_ssl, updated_at)
-                   VALUES (1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                   ON CONFLICT(id) DO UPDATE SET
-                     smtp_host=excluded.smtp_host,
-                     smtp_port=excluded.smtp_port,
-                     smtp_user=excluded.smtp_user,
-                     smtp_password=excluded.smtp_password,
-                     smtp_from=excluded.smtp_from,
-                     smtp_use_ssl=excluded.smtp_use_ssl,
-                     updated_at=CURRENT_TIMESTAMP""",
-                (host, port, user, password, smtp_from, use_ssl),
-            )
-        return True
-    except Exception as e:
-        logger.error(f"保存 SMTP 设置失败: {e}")
-        return False
-
-
-def add_zhihu_email_log(email: str, subject: str, url_token: str,
-                        post_ids: str, status: str,
-                        error_message: str = "") -> int:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """INSERT INTO zhihu_email_log
-               (email, subject, url_token, post_ids, status, error_message)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (email, subject, url_token or "", post_ids or "[]", status, error_message),
-        )
-        return cur.lastrowid or 0
-
-
-def get_zhihu_email_logs(limit: int = 50) -> list:
-    with get_connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT * FROM zhihu_email_log ORDER BY sent_at DESC LIMIT ?",
-            (limit,),
-        )
-        return [dict(r) for r in cur.fetchall()]
-
-
-def count_unanalyzed_posts(url_token: str = None) -> int:
-    """统计尚未分析过的 post 数（用于邮件通知节流判断）。"""
-    with get_connection() as conn:
-        cur = conn.cursor()
-        if url_token:
-            cur.execute(
-                """SELECT COUNT(*) AS c FROM zhihu_posts p
-                   LEFT JOIN zhihu_analyses a ON a.post_id = p.post_id
-                   WHERE p.url_token=? AND a.id IS NULL""",
-                (url_token,),
-            )
-        else:
-            cur.execute(
-                """SELECT COUNT(*) AS c FROM zhihu_posts p
-                   LEFT JOIN zhihu_analyses a ON a.post_id = p.post_id
-                   WHERE a.id IS NULL"""
-            )
-        row = cur.fetchone()
-        return row["c"] if row else 0
-
-
 # ── 全市场舆情观测台（v4, 2026-06-06）──
 # 5 张新表的 upsert + 6 个 read 函数
 # DDL 走 db_compat.upsert_sql()，未来切 MySQL 时只改 db_compat 一个文件
@@ -2350,6 +2112,21 @@ def seed_scheduler_config_if_absent(row: dict) -> bool:
             values,
         )
         return cur.rowcount > 0
+
+
+def delete_scheduler_configs_not_in(valid_job_ids: list[str]) -> int:
+    """删除注册表之外的遗留调度配置行（模块移除后避免出现幽灵任务）。"""
+    if not valid_job_ids:
+        return 0
+    placeholders = ",".join(["?"] * len(valid_job_ids))
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"DELETE FROM scheduler_task_config "
+            f"WHERE job_id NOT IN ({placeholders})",
+            valid_job_ids,
+        )
+        return cur.rowcount
 
 
 def update_scheduler_config(job_id: str, updated_by: str | None = None,

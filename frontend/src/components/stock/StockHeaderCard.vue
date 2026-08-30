@@ -12,7 +12,7 @@
         {{ name || code }}
         <el-icon :size="12" class="stock-header__ext"><Promotion /></el-icon>
       </a>
-      <span v-else class="stock-header__name">{{ name || code || '—' }}</span>
+      <span v-else class="stock-header__name">{{ name || code || '-' }}</span>
 
       <el-tag v-if="code" type="info" size="small" class="stock-header__code">
         {{ code }}

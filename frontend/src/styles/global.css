@@ -47,6 +47,13 @@ select {
   color: inherit;
 }
 
+/* 键盘可达性：统一 focus 环（指针点击不显示） */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus);
+  border-radius: var(--radius-sm);
+}
+
 /* 滚动条：细而克制 */
 ::-webkit-scrollbar {
   width: 8px;
@@ -58,16 +65,26 @@ select {
 ::-webkit-scrollbar-thumb {
   background: var(--color-border);
   border-radius: var(--radius-full);
-  transition: background var(--duration-base) var(--ease);
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-border-strong);
 }
 
-/* 选区颜色 */
 ::selection {
-  background: rgba(79, 70, 229, 0.18);
+  background: rgba(37, 99, 235, 0.16);
   color: var(--color-text-primary);
+}
+
+/* ── 动效守卫（刻度 3，非协商项） ── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ── A 股涨跌色（全局工具类） ── */
@@ -84,18 +101,104 @@ select {
   color: var(--color-text-secondary);
 }
 
+/* ── 数字即界面：数据数字统一等宽 + 表格数字 ── */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.num--up {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-up);
+}
+.num--down {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-down);
+}
+
+/* ── 骨架屏（替代环形 spinner 的加载形态） ── */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--color-bg-muted);
+  border-radius: var(--radius-sm);
+  min-height: 1em;
+}
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.65),
+    transparent
+  );
+  animation: skeleton-sweep 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-sweep {
+  100% {
+    transform: translateX(100%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+}
+
+/* ── 数据状态徽标（SPEC 3.4：loading/ready/stale/partial/degraded/unavailable） ── */
+.state-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: 18px;
+  white-space: nowrap;
+}
+.state-badge--ready {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+.state-badge--stale,
+.state-badge--partial {
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+}
+.state-badge--degraded {
+  background: var(--color-info-soft);
+  color: var(--color-info);
+}
+.state-badge--unavailable {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+.state-badge--loading {
+  background: var(--color-bg-muted);
+  color: var(--color-text-tertiary);
+}
+
 /* ── 通用卡片（覆盖 Element Plus 默认） ── */
+.modern-card {
+  min-width: 0;
+}
 .section-card {
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
   margin-bottom: var(--space-6);
-  transition: box-shadow var(--duration-base) var(--ease),
-              border-color var(--duration-base) var(--ease);
+  transition: border-color var(--duration-base) var(--ease),
+              box-shadow var(--duration-base) var(--ease);
 }
 .section-card:hover {
-  box-shadow: var(--shadow-md);
+  border-color: var(--color-border-strong);
 }
 .section-card :deep(.el-card__header) {
   padding: var(--space-4) var(--space-5);
@@ -112,24 +215,28 @@ select {
   letter-spacing: -0.01em;
 }
 
-/* ── Element Plus 主题细化 ── */
+/* ── Element Plus 主题细化（全部跟随 token，随主色自动一致） ── */
 .el-button {
   border-radius: var(--radius-md);
   font-weight: var(--weight-medium);
   transition: all var(--duration-fast) var(--ease);
+}
+.el-button:active {
+  transform: translateY(1px);
 }
 .el-button--primary {
   --el-button-bg-color: var(--color-accent);
   --el-button-border-color: var(--color-accent);
   --el-button-hover-bg-color: var(--color-accent-hover);
   --el-button-hover-border-color: var(--color-accent-hover);
-  --el-button-active-bg-color: var(--color-accent-hover);
+  --el-button-active-bg-color: var(--color-accent-active);
 }
 .el-button--default {
   --el-button-bg-color: var(--color-bg-elevated);
   --el-button-border-color: var(--color-border);
   --el-button-hover-border-color: var(--color-border-strong);
   --el-button-hover-bg-color: var(--color-bg-muted);
+  --el-button-hover-text-color: var(--color-text-primary);
   color: var(--color-text-primary);
 }
 
@@ -167,14 +274,15 @@ select {
 .el-table td.el-table__cell {
   border-bottom: 1px solid var(--color-divider);
 }
+.el-table .el-table__cell .cell {
+  font-variant-numeric: tabular-nums;
+}
 
 .el-tag {
   border-radius: var(--radius-sm);
   font-weight: var(--weight-medium);
   border: none;
 }
-
-/* el-tag 主题色同步 indigo */
 .el-tag--primary {
   --el-tag-bg-color: var(--color-accent-soft);
   --el-tag-border-color: transparent;
@@ -242,6 +350,11 @@ select {
   color: var(--color-accent);
 }
 
+/* el-progress 主题色对齐 */
+.el-progress-bar__outer {
+  background-color: var(--color-bg-inset);
+}
+
 /* ── 路由切换动画 ── */
 .fade-enter-active,
 .fade-leave-active {
@@ -259,7 +372,7 @@ select {
 }
 .slide-up-enter-from,
 .slide-up-leave-to {
-  transform: translateY(20px);
+  transform: translateY(12px);
   opacity: 0;
 }
 
@@ -273,3 +386,13 @@ select {
 .gap-3 { gap: var(--space-3); }
 .gap-4 { gap: var(--space-4); }
 .gap-6 { gap: var(--space-6); }
+
+/* ── 移动端横向溢出防护 ──
+ * 窄屏下宽表格会把固定宽度列撑出视口；约束卡片宽度并让表格容器内部滚动，
+ * 避免整页横向滚动。 */
+@media (max-width: 1024px) {
+  .modern-card {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}

@@ -1,30 +1,59 @@
+# Version control and local tooling
 .git
 .gitignore
+.github
+.agents
+.codex
 .idea
 .vscode
 
+# Secrets and local environment files（任意层级，含 frontend/.env*）
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Python environments, caches, tests, and reports
+.venv
 venv
 venv_new
-__pycache__
-*.pyc
-*.pyo
-*.egg-info
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests
+htmlcov
+.coverage
 
-stocks.db
+# Runtime state and research/model artifacts
+data
+data/models
+data/research
+logs
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+**/*.log
 market_dividends_cache.json
-*.log
 
-.env
-.env.example
-
-node_modules
-frontend
-
-doc
-start
-build
+# Project documentation and local tooling（frontend 源码除外：单容器镜像要在
+# 构建阶段内编译前端产物，因此只排除其依赖缓存与本地构建输出）
+docs
 deploy
-PROJECT_STATUS.md
-CLAUDE.md
-README.md
+scripts
 *.md
+frontend/node_modules
+frontend/dist
+frontend/legacy
+frontend/.dockerignore
+frontend/Dockerfile
+frontend/coverage
+
+# Miscellaneous build output
+node_modules
+build
+start
+PROJECT_STATUS.md

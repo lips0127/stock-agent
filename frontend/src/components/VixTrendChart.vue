@@ -1,17 +1,5 @@
 <template>
   <div class="vix-trend-wrap">
-    <div class="vix-trend-toolbar" aria-label="chart scale">
-      <button
-        v-for="mode in modes"
-        :key="mode.value"
-        class="mode-btn"
-        :class="{ active: viewMode === mode.value }"
-        type="button"
-        @click="viewMode = mode.value"
-      >
-        {{ mode.label }}
-      </button>
-    </div>
     <div ref="chartEl" class="vix-trend" />
   </div>
 </template>
@@ -21,101 +9,45 @@ import { onMounted, onBeforeUnmount, ref, watch, shallowRef } from 'vue'
 import * as echarts from 'echarts/core'
 import { LineChart } from 'echarts/charts'
 import {
-  GridComponent, TooltipComponent, MarkLineComponent, MarkAreaComponent,
-  LegendComponent,
+  GridComponent, TooltipComponent, LegendComponent, VisualMapComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 
 echarts.use([
-  LineChart, GridComponent, TooltipComponent,
-  MarkLineComponent, MarkAreaComponent, LegendComponent, CanvasRenderer,
+  LineChart, GridComponent, TooltipComponent, LegendComponent,
+  VisualMapComponent, CanvasRenderer,
 ])
 
 const props = defineProps({
+  // 历史行：单序列模式 { date, score, percentile, regime }；
+  // 多轨道模式额外读取 row.size_tracks[key].greed / .regime。
   history: { type: Array, default: () => [] },
-  height: { type: Number, default: 220 },
-  // v5: 阈值带改为 composite 百分位 10/30/70/90（在右 Y 轴 0-100 范围内）
-  bands: {
-    type: Array,
-    default: () => [
-      { from: 0,  to: 10, color: 'rgba(220,38,38,0.06)' },
-      { from: 10, to: 30, color: 'rgba(249,115,22,0.06)' },
-      { from: 30, to: 70, color: 'rgba(250,204,21,0.05)' },
-      { from: 70, to: 90, color: 'rgba(132,204,22,0.06)' },
-      { from: 90, to: 100, color: 'rgba(16,185,129,0.06)' },
-    ],
-  },
+  // 单序列名（tooltip 标题）
+  label: { type: String, default: '恐慌贪婪指数' },
+  // 多轨道模式：[{ key, label }]；设置后按轨道画多条固定配色线
+  trackKeys: { type: Array, default: null },
+  height: { type: Number, default: 300 },
 })
 
 const chartEl = ref(null)
 const chart = shallowRef(null)
-const viewMode = ref('absolute')
-const modes = [
-  { value: 'absolute', label: '绝对' },
-  { value: 'sensitive', label: '敏感' },
-]
 
-function cleanNumbers(values) {
-  return values.filter((v) => typeof v === 'number' && Number.isFinite(v))
+const REGIME_LABELS = {
+  extreme_fear: '极度恐慌', fear: '恐慌', neutral: '中性',
+  greed: '贪婪', extreme_greed: '极度贪婪', unknown: '暂无数据',
+}
+// 拆分模式固定配色（按轨道身份，不按数值——数值语义色会和线身份冲突）
+const TRACK_COLORS = {
+  sh50: '#2563eb', hs300: '#7c3aed', zz500: '#ea580c',
+  cyb: '#0d9488', kcb: '#d946ef',
 }
 
-function quantile(values, q) {
-  const nums = cleanNumbers(values).sort((a, b) => a - b)
-  if (!nums.length) return null
-  const pos = (nums.length - 1) * q
-  const base = Math.floor(pos)
-  const rest = pos - base
-  if (nums[base + 1] == null) return nums[base]
-  return nums[base] + rest * (nums[base + 1] - nums[base])
-}
-
-function median(values) {
-  return quantile(values, 0.5)
-}
-
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v))
-}
-
-function stretchSeries(values) {
-  const nums = cleanNumbers(values)
-  if (nums.length < 2) return values.map((v) => (v == null ? null : 50))
-  const lo = quantile(nums, 0.05)
-  const hi = quantile(nums, 0.95)
-  if (lo == null || hi == null || Math.abs(hi - lo) < 0.0001) {
-    return values.map((v) => (v == null ? null : 50))
-  }
-  return values.map((v) => (v == null ? null : clamp(((v - lo) / (hi - lo)) * 100, 0, 100)))
-}
-
-function robustPressure(values) {
-  const nums = cleanNumbers(values)
-  const med = median(nums)
-  if (med == null) return values.map((v) => (v == null ? null : 50))
-  const deviations = nums.map((v) => Math.abs(v - med))
-  const mad = median(deviations) || 1
-  return values.map((v) => {
-    if (v == null) return null
-    const z = (v - med) / (mad * 1.4826)
-    return clamp(50 + z * 18, 0, 100)
-  })
-}
-
-function fmt(value, digits = 1) {
+function fmt(value, digits = 0) {
   return value == null || Number.isNaN(value) ? '-' : Number(value).toFixed(digits)
 }
 
-function regimeForComposite(pct) {
-  if (pct == null) return '暂无数据'
-  if (pct < 10) return '极度恐慌'
-  if (pct < 30) return '恐慌'
-  if (pct <= 70) return '中性'
-  if (pct <= 90) return '贪婪'
-  return '极度贪婪'
-}
-
 // 非交易日（周末）过滤：category 轴只渲染数组里的日期，混入周末行会
-// 既多出一个 x 槽、又因 vix_source 异常造成断线。绘图前先剔除。
+// 多出一个 x 槽。绘图前先剔除。
 function isTradingDay(dateStr) {
   const d = new Date(dateStr + 'T00:00:00')
   const wd = d.getDay()
@@ -123,188 +55,135 @@ function isTradingDay(dateStr) {
 }
 
 function buildOption() {
-  const rows = props.history.filter((d) => d && d.date && isTradingDay(d.date))
+  const rows = (props.history || [])
+    .filter((d) => d && d.date && isTradingDay(d.date))
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
   const dates = rows.map((d) => d.date)
-  // 合成 VIX：只要有数值就画，靠 connectNulls 跨越个别降级点保持曲线连续；
-  // 数据可信度由 data_quality 横幅 + tooltip 的 vix_source 体现，不再靠断线表达。
-  const values = rows.map((d) => (d.vix != null && Number.isFinite(d.vix) ? d.vix : null))
-  const fg = rows.map((d) => d.fear_greed)
-  const composite = rows.map((d) => d.composite_score)
-  const percentile = rows.map((d) => d.composite_percentile)
-  const sensitive = viewMode.value === 'sensitive'
-  const displayVix = sensitive ? robustPressure(values) : values
-  const displayFg = sensitive ? stretchSeries(fg) : fg
-  const displayComposite = sensitive ? stretchSeries(composite) : composite
-  const displayPercentile = sensitive ? stretchSeries(percentile) : percentile
 
-  // 图例只列出当前确有数据的曲线，避免出现空图例项
-  const hasData = (arr) => arr.some((v) => v != null && Number.isFinite(v))
-  const legendData = [
-    hasData(displayVix) && 'VIX',
-    hasData(displayFg) && 'FG',
-    hasData(displayComposite) && 'Composite',
-    hasData(displayPercentile) && 'Percentile',
-  ].filter(Boolean)
+  if (props.trackKeys && props.trackKeys.length) {
+    return buildMultiOption(rows, dates)
+  }
+  return buildSingleOption(rows, dates)
+}
+
+// 单序列（聚合）：量程固定 0-100，颜色随分值从绿（恐慌）过渡到红（贪婪）
+function buildSingleOption(rows, dates) {
+  // 缺失日保持 null 且不连线：不得把断点伪装成连续数据
+  const scores = rows.map((d) => {
+    const v = d.score
+    return v != null && Number.isFinite(Number(v)) ? Number(v) : null
+  })
+  const pcts = rows.map((d) => (d.percentile != null ? d.percentile : null))
 
   return {
-    legend: {
-      data: legendData,
-      top: 0,
-      left: 0,
-      icon: 'circle',
-      itemWidth: 8,
-      itemHeight: 8,
-      itemGap: 12,
-      textStyle: { color: '#71717a', fontSize: 11 },
-    },
-    grid: { left: 36, right: 36, top: 30, bottom: 28, containLabel: false },
+    grid: { left: 36, right: 20, top: 20, bottom: 28 },
     tooltip: {
       trigger: 'axis',
       backgroundColor: 'rgba(255,255,255,0.96)',
-      borderColor: '#e4e4e7',
-      borderWidth: 1,
-      padding: [8, 12],
+      borderColor: '#e4e4e7', borderWidth: 1, padding: [8, 12],
       textStyle: { color: '#18181b', fontSize: 12 },
       extraCssText: 'border-radius: 8px; box-shadow: 0 4px 16px rgba(15,15,15,0.08);',
       formatter: (params) => {
-        const [v, g, c, p] = params
-        const idx = v ? v.dataIndex : (g ? g.dataIndex : 0)
-        const rawVix = values[idx]
-        const rawFg = fg[idx]
-        const rawComposite = composite[idx]
-        const rawPct = percentile[idx]
-        const rawZ = rows[idx]?.vix_zscore
-        const zText = rawZ != null ? ` (Z=${rawZ.toFixed(1)})` : ''
-        const rawLine = sensitive
-          ? `<div style="margin-top:6px;padding-top:6px;border-top:1px solid #f4f4f5;color:#71717a;font-size:11px;">
-              原始 VIX ${fmt(rawVix, 2)}${zText} · FG ${fmt(rawFg, 0)} · 综合 ${fmt(rawComposite, 1)} · 百分位 ${fmt(rawPct, 0)}%
-            </div>`
-          : ''
+        const idx = params[0] ? params[0].dataIndex : 0
+        const score = scores[idx]
+        const pct = pcts[idx]
+        const regime = REGIME_LABELS[rows[idx]?.regime] || '暂无数据'
         return `
-          <div style="font-weight:600;margin-bottom:4px;">${(v || g || c || p).axisValue}</div>
+          <div style="font-weight:600;margin-bottom:4px;">${dates[idx]}</div>
           <div style="display:flex;justify-content:space-between;gap:16px;">
-            <span style="color:#71717a;">${sensitive ? 'VIX压力' : '合成VIX'}</span>
-            <span style="font-weight:600;font-variant-numeric:tabular-nums;">${v ? fmt(v.value, sensitive ? 0 : 2) : '-'}${!sensitive && rawZ != null ? ` <span style="color:#a1a1aa;font-weight:400;">Z=${rawZ.toFixed(1)}</span>` : ''}</span>
+            <span style="color:#71717a;">${props.label}</span>
+            <span style="font-weight:600;font-variant-numeric:tabular-nums;">${fmt(score)}</span>
           </div>
           <div style="display:flex;justify-content:space-between;gap:16px;">
-            <span style="color:#71717a;">恐惧贪婪</span>
-            <span style="font-weight:600;font-variant-numeric:tabular-nums;">${g ? fmt(g.value, 0) : '-'}</span>
+            <span style="color:#71717a;">近 252 日百分位</span>
+            <span style="font-weight:600;font-variant-numeric:tabular-nums;">${pct != null ? fmt(pct) + '%' : '-'}</span>
           </div>
-          <div style="display:flex;justify-content:space-between;gap:16px;">
-            <span style="color:#1e1b4b;">综合位置</span>
-            <span style="font-weight:600;font-variant-numeric:tabular-nums;">${c ? fmt(c.value, 1) : '-'}</span>
-          </div>
-          <div style="display:flex;justify-content:space-between;gap:16px;">
-            <span style="color:#7c3aed;">滚动百分位</span>
-            <span style="font-weight:600;font-variant-numeric:tabular-nums;">${p ? fmt(p.value, 0) + '%' : '-'}</span>
-          </div>
-          ${rawLine}
-          <div style="margin-top:4px;font-size:11px;color:#a1a1aa;">${regimeForComposite(rawPct)}</div>
+          <div style="margin-top:4px;font-size:11px;color:#a1a1aa;">${regime}</div>
         `
       },
     },
     xAxis: {
-      type: 'category',
-      data: dates,
-      boundaryGap: false,
-      axisLine: { show: false },
-      axisTick: { show: false },
-      axisLabel: {
-        color: '#a1a1aa',
-        fontSize: 10,
-        formatter: (v) => v.slice(5),
-      },
+      type: 'category', data: dates, boundaryGap: false,
+      axisLine: { show: false }, axisTick: { show: false },
+      axisLabel: { color: '#a1a1aa', fontSize: 10, formatter: (v) => v.slice(5) },
     },
-    yAxis: [
-      {
-        // 左轴：合成 VIX 原始值（绝对模式）
-        type: 'value',
-        name: sensitive ? '压力' : 'VIX',
-        position: 'left',
-        min: sensitive ? 0 : (val) => Math.max(0, Math.floor(val.min - 2)),
-        max: sensitive ? 100 : (val) => Math.ceil(val.max + 2),
-        splitLine: { lineStyle: { color: '#f4f4f5' } },
-        axisLine: { show: false },
-        axisTick: { show: false },
-        axisLabel: { color: '#a1a1aa', fontSize: 10 },
-        nameTextStyle: { color: '#a1a1aa', fontSize: 10, padding: [0, 0, 0, -20] },
-      },
-      {
-        // 右轴：composite / percentile / FG 共享 0-100
-        type: 'value',
-        name: sensitive ? '相对' : '综合/百分位',
-        position: 'right',
-        min: 0,
-        max: 100,
-        splitLine: { show: false },
-        axisLine: { show: false },
-        axisTick: { show: false },
-        axisLabel: { color: '#a1a1aa', fontSize: 10 },
-      },
-    ],
+    yAxis: {
+      type: 'value', min: 0, max: 100,
+      splitLine: { lineStyle: { color: '#f4f4f5' } },
+      axisLine: { show: false }, axisTick: { show: false },
+      axisLabel: { color: '#a1a1aa', fontSize: 10 },
+    },
+    visualMap: {
+      show: false, min: 0, max: 100,
+      inRange: { color: ['#059669', '#facc15', '#dc2626'] },
+    },
     series: [
       {
-        name: 'VIX',
-        type: 'line',
-        data: displayVix,
-        smooth: true,
-        showSymbol: false,
-        connectNulls: true,
-        lineStyle: { width: 2, color: '#4f46e5' },
-        areaStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(79,70,229,0.18)' },
-            { offset: 1, color: 'rgba(79,70,229,0)' },
-          ]),
-        },
-      },
-      {
-        name: 'FG',
-        type: 'line',
-        yAxisIndex: 1,
-        data: displayFg,
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { width: 1.5, color: '#a1a1aa', type: 'dashed' },
-      },
-      {
-        name: 'Composite',
-        type: 'line',
-        yAxisIndex: 1,
-        data: displayComposite,
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { width: 2, color: '#1e1b4b' },
-        // v5: 百分位阈值带 + 阈值线（仅绝对模式 + Composite 线上叠加）
-        markArea: !sensitive ? {
-          silent: true,
-          itemStyle: { opacity: 0.6 },
-          data: props.bands.map((b) => [
-            { yAxis: b.from, itemStyle: { color: b.color } },
-            { yAxis: b.to },
-          ]),
-        } : undefined,
-        markLine: !sensitive ? {
-          silent: true,
-          symbol: 'none',
-          lineStyle: { color: '#d4d4d8', type: 'dashed', width: 1 },
-          data: [
-            { yAxis: 30, label: { show: false } },
-            { yAxis: 70, label: { show: false } },
-          ],
-        } : undefined,
-      },
-      {
-        // v5 新增：composite 滚动百分位（右轴）
-        name: 'Percentile',
-        type: 'line',
-        yAxisIndex: 1,
-        data: displayPercentile,
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { width: 1.5, color: '#7c3aed', type: 'dotted' },
+        name: props.label, type: 'line', data: scores,
+        smooth: true, showSymbol: false, connectNulls: false,
+        lineStyle: { width: 2.5 },
       },
     ],
+  }
+}
+
+// 多轨道（大小盘拆分）：每条轨道一条固定配色线
+function buildMultiOption(rows, dates) {
+  const keys = props.trackKeys
+  const series = keys.map((tk) => ({
+    name: tk.label,
+    type: 'line',
+    data: rows.map((r) => {
+      const v = r.size_tracks?.[tk.key]?.greed
+      return v != null && Number.isFinite(Number(v)) ? Number(v) : null
+    }),
+    smooth: true, showSymbol: false, connectNulls: false,
+    lineStyle: { width: 2 },
+    color: TRACK_COLORS[tk.key] || '#71717a',
+  }))
+
+  return {
+    grid: { left: 36, right: 20, top: 34, bottom: 28 },
+    legend: {
+      top: 0, icon: 'circle', itemWidth: 8, itemHeight: 8,
+      textStyle: { color: '#71717a', fontSize: 11 },
+      itemGap: 14,
+    },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: 'rgba(255,255,255,0.96)',
+      borderColor: '#e4e4e7', borderWidth: 1, padding: [8, 12],
+      textStyle: { color: '#18181b', fontSize: 12 },
+      extraCssText: 'border-radius: 8px; box-shadow: 0 4px 16px rgba(15,15,15,0.08);',
+      formatter: (params) => {
+        const idx = params[0] ? params[0].dataIndex : 0
+        const row = rows[idx]
+        const lines = params
+          .map((p) => {
+            const t = row?.size_tracks?.[keys[p.seriesIndex]?.key]
+            const regime = REGIME_LABELS[t?.regime] || ''
+            const color = TRACK_COLORS[keys[p.seriesIndex]?.key] || '#71717a'
+            return `<div style="display:flex;justify-content:space-between;gap:16px;">
+              <span style="color:#71717a;"><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${color};margin-right:6px;"></span>${p.seriesName}</span>
+              <span style="font-weight:600;font-variant-numeric:tabular-nums;">${fmt(p.value)}${regime ? ` <span style="font-weight:400;color:#a1a1aa;font-size:11px;">${regime}</span>` : ''}</span>
+            </div>`
+          })
+          .join('')
+        return `<div style="font-weight:600;margin-bottom:4px;">${dates[idx]}</div>${lines}`
+      },
+    },
+    xAxis: {
+      type: 'category', data: dates, boundaryGap: false,
+      axisLine: { show: false }, axisTick: { show: false },
+      axisLabel: { color: '#a1a1aa', fontSize: 10, formatter: (v) => v.slice(5) },
+    },
+    yAxis: {
+      type: 'value', min: 0, max: 100,
+      splitLine: { lineStyle: { color: '#f4f4f5' } },
+      axisLine: { show: false }, axisTick: { show: false },
+      axisLabel: { color: '#a1a1aa', fontSize: 10 },
+    },
+    series,
   }
 }
 
@@ -331,44 +210,12 @@ onBeforeUnmount(() => {
   chart.value = null
 })
 
-watch(() => props.history, render, { deep: true })
-watch(viewMode, render)
+watch(() => [props.history, props.trackKeys], render, { deep: true })
 </script>
 
 <style scoped>
 .vix-trend-wrap {
   position: relative;
-}
-
-.vix-trend-toolbar {
-  position: absolute;
-  top: 0;
-  right: 4px;
-  z-index: 2;
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid #e4e4e7;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.86);
-  backdrop-filter: blur(10px);
-}
-
-.mode-btn {
-  height: 24px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: #71717a;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.mode-btn.active {
-  background: #4f46e5;
-  color: #fff;
-  box-shadow: 0 1px 4px rgba(79, 70, 229, 0.25);
 }
 
 .vix-trend {

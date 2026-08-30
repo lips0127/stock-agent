@@ -16,17 +16,32 @@ import pandas as pd
 from backend.core.database import (
     upsert_vix2_history, get_vix2_latest, get_vix2_history,
     get_vix2_scores_asc, update_vix2_percentile,
+    upsert_vix2_truth, get_vix2_truth_scores_asc, update_vix2_truth_percentile,
 )
 from backend.services.vix2_features import (
     CORE_FEATURES, build_core_features, latest_feature_row,
 )
 from backend.services.vix2_model import (
     load_model, predict_score, get_model_meta,
-    load_truth_model, predict_truth_score,
+    load_truth_model, predict_truth_score, train_truth_at_cutoff,
+    get_walkforward_meta, save_walkforward_meta,
 )
 from backend.services.vix_service import classify_by_percentile
 
 logger = logging.getLogger(__name__)
+
+
+def classify_fear_percentile(percentile: float) -> str:
+    """按恐惧分百分位解释状态：百分位越高，恐惧越强。"""
+    if percentile >= 90:
+        return "极度恐慌"
+    if percentile >= 70:
+        return "恐慌"
+    if percentile >= 30:
+        return "中性"
+    if percentile >= 10:
+        return "平静"
+    return "极度平静"
 
 
 def compute_and_store_vix2(date_str: Optional[str] = None,
@@ -62,6 +77,24 @@ def compute_and_store_vix2(date_str: Optional[str] = None,
     return {"date": frow["date"], **payload}
 
 
+def recompute_vix2_truth_percentiles(window: int = 252) -> dict:
+    """全表重算 truth_percentile（point-in-time，纯 DB）。返回 {"updated": N}。"""
+    scores = get_vix2_truth_scores_asc()
+    updated = 0
+    for i, (d, score) in enumerate(scores):
+        start = max(0, i + 1 - window)
+        hist = [s for _, s in scores[start:i + 1]]
+        if len(hist) < 5:
+            pct = 50.0
+        else:
+            below = sum(1 for v in hist if v <= score)
+            pct = round(below / len(hist) * 100, 1)
+        update_vix2_truth_percentile(d, pct, classify_fear_percentile(pct))
+        updated += 1
+    logger.info(f"recompute_vix2_truth_percentiles: 重算 {updated} 行")
+    return {"updated": updated}
+
+
 def recompute_vix2_percentiles(window: int = 252) -> dict:
     """全表重算 percentile + regime（point-in-time，纯 DB）。返回 {"updated": N}。"""
     scores = get_vix2_scores_asc()
@@ -78,6 +111,162 @@ def recompute_vix2_percentiles(window: int = 252) -> dict:
         updated += 1
     logger.info(f"recompute_vix2_percentiles: 重算 {updated} 行")
     return {"updated": updated}
+
+
+def backfill_vix2_walkforward(days: int = 0, block_size: int = 60,
+                              skip_existing: bool = False, task_runner=None,
+                              cv_gap: int = 5, min_train_samples: int = 200,
+                              n_splits: int = 5) -> dict:
+    """按时间顺序回填 VIX2 同日构造分状态估计。
+
+    `days` 只限制输出窗口；训练始终保留输出日前的全部可用历史。每个块的模型只
+    使用块首日之前的样本，交叉验证保留至少五个交易日的 gap。这里拟合的是同日
+    构造状态，不是未来收益或交易信号。
+    """
+    from backend.services.vix2_truth_labels import build_truth_labeled_dataset
+    import numpy as np
+
+    def _ms(msg):
+        logger.info(msg)
+        if task_runner:
+            task_runner.milestone(msg)
+
+    if days < 0:
+        raise ValueError("days 不能小于 0")
+    if not 1 <= block_size <= 252:
+        raise ValueError("block_size 必须在 1 到 252 之间")
+    if cv_gap < 5 or cv_gap > 60:
+        raise ValueError("cv_gap 必须在 5 到 60 个交易日之间")
+    if min_train_samples < 40:
+        raise ValueError("min_train_samples 必须至少为 40")
+    if not 2 <= n_splits <= 10:
+        raise ValueError("n_splits 必须在 2 到 10 之间")
+
+    _ms("构建核心因子 + 同日构造状态标签数据集…")
+    ds = build_truth_labeled_dataset()
+    if ds is None or len(ds) <= min_train_samples:
+        raise RuntimeError(f"walk-forward 样本不足: {0 if ds is None else len(ds)}")
+    ds = ds.sort_values("date").reset_index(drop=True)
+    n = len(ds)
+    output_start = max(min_train_samples, n - days) if days else min_train_samples
+    output_total = n - output_start
+    if task_runner:
+        task_runner.set_total(output_total)
+
+    existing = set()
+    if skip_existing:
+        existing = {d for d, _ in get_vix2_truth_scores_asc()}
+
+    version_tag = f"vix2-wf-{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+    written = 0
+    skipped = 0
+    model_errors = []
+    baseline_errors = []
+    block_audit = []
+    block_wins = 0
+    i = output_start
+    while i < n:
+        cutoff = i
+        block_end = min(i + block_size, n)
+        trained = train_truth_at_cutoff(
+            ds, cutoff, n_splits=n_splits, cv_gap=cv_gap,
+            min_train_samples=min_train_samples,
+        )
+        if trained is None:
+            i = block_end
+            continue
+        pipe = trained["pipe"]
+        train_cutoff = trained["train_cutoff"]
+        block_df = ds.iloc[i:block_end]
+        first_prediction_date = str(block_df.iloc[0]["date"])
+        if not train_cutoff < first_prediction_date:
+            raise RuntimeError(
+                f"时间边界审计失败: train_cutoff={train_cutoff}, "
+                f"prediction_date={first_prediction_date}"
+            )
+        X_block = block_df[CORE_FEATURES].to_numpy(dtype=float)
+        preds = np.clip(pipe.predict(X_block), 0, 100)
+        actual = block_df["fear_truth"].to_numpy(dtype=float)
+        baseline = ds.iloc[i - 1:block_end - 1]["fear_truth"].to_numpy(dtype=float)
+        block_model_errors = np.abs(preds - actual)
+        block_baseline_errors = np.abs(baseline - actual)
+        model_errors.extend(block_model_errors.tolist())
+        baseline_errors.extend(block_baseline_errors.tolist())
+        if float(block_model_errors.mean()) < float(block_baseline_errors.mean()):
+            block_wins += 1
+        block_audit.append({
+            "prediction_start": first_prediction_date,
+            "prediction_end": str(block_df.iloc[-1]["date"]),
+            "train_cutoff": train_cutoff,
+            "n_train": trained["n_train"],
+            "cv_gap": trained["cv_gap"],
+            "cv_folds": trained["cv_folds"],
+        })
+        for j, (_, row) in enumerate(block_df.iterrows()):
+            d = row["date"]
+            if d in existing:
+                skipped += 1
+                continue
+            upsert_vix2_truth(d, round(float(preds[j]), 2), version_tag, train_cutoff)
+            written += 1
+        if task_runner:
+            task_runner.check_cancelled()
+            task_runner.set_current(f"walk-forward {block_df.iloc[0]['date']}~{block_df.iloc[-1]['date']}")
+            task_runner.progress(block_end - output_start)
+        i = block_end
+
+    if not model_errors:
+        raise RuntimeError("没有生成可验证的时间顺序状态估计")
+    model_mae = float(np.mean(model_errors))
+    baseline_mae = float(np.mean(baseline_errors))
+    block_win_rate = block_wins / len(block_audit)
+    stable_baseline_improvement = (
+        len(block_audit) >= 3
+        and model_mae <= baseline_mae * 0.98
+        and block_win_rate >= 0.60
+    )
+    validation_status = (
+        "state_fit_outperformed_baseline"
+        if stable_baseline_improvement else "no_robust_edge"
+    )
+
+    _ms("重算构造分拟合的滚动百分位…")
+    rc = recompute_vix2_truth_percentiles()
+    result = {
+        "run_version": version_tag,
+        "written": written,
+        "skipped": skipped,
+        "dataset_samples": n,
+        "output_samples": output_total,
+        "requested_days": days,
+        "output_start_date": str(ds.iloc[output_start]["date"]),
+        "output_end_date": str(ds.iloc[-1]["date"]),
+        "min_train_samples": min_train_samples,
+        "block_size": block_size,
+        "cv_gap": cv_gap,
+        "model_oos_mae": round(model_mae, 4),
+        "baseline_lag1_oos_mae": round(baseline_mae, 4),
+        "block_baseline_win_rate": round(block_win_rate, 4),
+        "validation_status": validation_status,
+        "target_definition": "同日构造恐惧状态分（0-100），不是未来收益标签",
+        "target_horizon": "same_day",
+        "target_components": ["price_drawdown", "iv_surge", "iv_level_gate"],
+        "breadth_available": False,
+        "breadth_component_used": False,
+        "predictive_claim": False,
+        "baseline_definition": "前一交易日构造分（lag-1 persistence）",
+        "block_audit": block_audit,
+        **rc,
+    }
+    save_walkforward_meta(result)
+    if task_runner:
+        task_runner.complete(result=result)
+    _ms(
+        f"时间顺序状态估计完成: 写入 {written}/{output_total}，跳过 {skipped}，"
+        f"模型 MAE={model_mae:.3f}，lag-1 MAE={baseline_mae:.3f}，"
+        f"验证状态={validation_status}"
+    )
+    return result
 
 
 def backfill_vix2(days: int = 365, skip_existing: bool = False, task_runner=None) -> dict:
@@ -173,6 +362,9 @@ def get_vix2_latest_api() -> dict:
         "model_trained": meta is not None,
         "truth_model_trained": tpipe is not None,
         "truth_prediction": truth_pred,
+        "truth_prediction_mode": "full_sample_same_day_state_fit",
+        "truth_prediction_warning": "实验性同日状态拟合，不是未来收益预测或交易信号",
+        "walkforward_validation": get_walkforward_meta(),
     }
 
 

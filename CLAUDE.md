@@ -20,7 +20,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **API & 核心**
 - `api/app.py` — Flask 应用入口
-- `api/routes/` — API 路由（auth, market, ops, sentiment, zhihu, vix, vix2, intraday, financial, scheduler, tasks, stock_dashboard）
+- `api/routes/` — API 路由（auth, market, ops, sentiment, vix, vix2, intraday, financial, scheduler, tasks, stock_dashboard）
 - `api/routes/tasks.py` — 统一任务 API（6 个端点：列表/详情/日志/取消/活跃/最近）**【Phase A, 2026-06-10】**
 - `core/database.py` — SQLite 数据库操作（task_runs / task_run_logs 等表）
 - `core/task_runner.py` — 统一任务执行器（TaskRunner 上下文管理器）**【Phase A, 2026-06-10】**
@@ -34,13 +34,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `services/forum_service.py` — 东财股吧爬虫
 - `services/sentiment_service.py` — LLM 情绪分析（LangChain）
 - `services/vix_service.py` / `vix2_service.py` — VIX 恐慌指数 + VIX2.0 ML 情绪回归
-- `services/zhihu_service.py` / `zhihu_analyzer.py` — 知乎大V抓取与 LLM 分析
 - `services/financial_service.py` — 财报 PDF 解析
 - `tasks/market_scan.py` — 扫描脚本
 
 ### 前端 (`frontend/`)
 - Vue 3 + Element Plus + Pinia + Vue Router 单页应用
-- 页面：仪表盘、全量扫描、红利指数、舆情监控、VIX、知乎大V、财报解析、任务调度
+- 页面：仪表盘、全量扫描、红利指数、自选股、舆情监控、VIX、财报解析、任务调度（知乎大V模块已于 2026-08-30 移除，见 docs/SPEC.md 第 5 节）
 - 调用 `/api/` 获取数据，生产环境由 Nginx 托管 dist/
 
 ## 启动方式
@@ -85,7 +84,6 @@ SQLite 文件：`stocks.db`（或 docker-compose 里的 `/data/stocks.db`）
 - `sentiment_scores` — LLM 情绪评分
 - `sentiment_post_labels` / `sentiment_indicators` / `sentiment_top_picks` / `sentiment_filters` — 舆情因子生产线
 - `sentiment_universe_*` — 全市场舆情观测台
-- `zhihu_users` / `zhihu_posts` / `zhihu_analyses` / `zhihu_email_*` / `zhihu_smtp_settings` — 知乎大V监控
 - `vix_history` — VIX 历史
 - `scheduler_task_config` / `scheduler_task_run` — 调度配置与运行记录
 - `financial_reports_cache` — 财报解析缓存
@@ -123,8 +121,7 @@ SQLite 文件：`stocks.db`（或 docker-compose 里的 `/data/stocks.db`）
 |------|------|
 | `GET /api/vix/recompute_status` | 410 Gone |
 | `GET /api/vix/backfill_status` | 410 Gone |
-| `GET /api/zhihu/refresh_status/<id>` | 兼容层（deprecated: true） |
-| `GET /api/zhihu/analyze_status/<id>` | 兼容层（deprecated: true） |
+| `/api/zhihu/*` 全部端点 | 已随知乎模块移除（2026-08-30），不复存在 |
 
 # 核心工作协议 (CRITICAL)
 - **设计优先**：在接受任何 Feature 开发或大规模重构任务前，必须先阅读并更新 `docs/SPEC.md`。

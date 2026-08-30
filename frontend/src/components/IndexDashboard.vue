@@ -35,7 +35,7 @@
               {{ formatDelta(row.vs_yesterday_score) }}
             </span>
           </template>
-          <template v-else>—</template>
+          <template v-else>-</template>
         </div>
 
         <div class="index-card__badges">
@@ -86,10 +86,10 @@ async function load() {
 }
 
 function scoreColor(s) {
-  if (s == null) return 'var(--text-tertiary, #999)'
-  if (s >= 60) return 'var(--color-bull, #16a34a)'
-  if (s <= 40) return 'var(--color-bear, #dc2626)'
-  return 'var(--text-primary, #1a1a1a)'
+  if (s == null) return 'var(--color-text-tertiary)'
+  if (s >= 60) return 'var(--color-success)'
+  if (s <= 40) return 'var(--color-danger)'
+  return 'var(--color-text-primary)'
 }
 
 function deltaClass(d) {
@@ -121,143 +121,157 @@ onUnmounted(() => {
 
 <style scoped>
 .index-dashboard {
-  background: var(--bg-card, #fff);
-  border: 1px solid var(--border-soft, #e5e7eb);
-  border-radius: 12px;
-  padding: 20px 24px;
-  margin-bottom: 16px;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5) var(--space-6);
+  margin-bottom: var(--space-4);
 }
 
 .index-dashboard__header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .index-dashboard__title {
-  font-size: 16px;
-  font-weight: 600;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
   margin: 0;
-  color: var(--text-primary, #1a1a1a);
+  color: var(--color-text-primary);
+  letter-spacing: -0.01em;
 }
 
 .index-dashboard__date {
-  font-size: 12px;
-  color: var(--text-tertiary, #6b7280);
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 .index-dashboard__loading,
 .index-dashboard__empty {
-  padding: 24px;
+  padding: var(--space-6);
   text-align: center;
-  color: var(--text-tertiary, #6b7280);
-  font-size: 13px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+.index-dashboard__empty code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  padding: 1px 6px;
+  background: var(--color-bg-muted);
+  border-radius: var(--radius-sm);
 }
 
 .index-dashboard__grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .index-card {
-  border: 1px solid var(--border-soft, #e5e7eb);
-  border-radius: 8px;
-  padding: 12px 14px;
-  background: var(--bg-elevated, #fafafa);
-  transition: border-color 0.15s;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg-page);
+  transition: border-color var(--duration-fast) var(--ease);
+}
+.index-card:hover {
+  border-color: var(--color-border-strong);
 }
 
 .index-card--panic {
-  border-color: var(--color-bear, #dc2626);
-  background: var(--bg-panic, #fef2f2);
+  border-color: rgba(220, 38, 38, 0.4);
+  background: var(--color-danger-soft);
 }
 
 .index-card__top {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 6px;
+  margin-bottom: var(--space-1);
 }
 
 .index-card__name {
-  font-weight: 600;
-  font-size: 13px;
-  color: var(--text-primary, #1a1a1a);
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
 }
 
 .index-card__total {
-  font-size: 11px;
-  color: var(--text-tertiary, #6b7280);
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
 }
 
 .index-card__score {
+  font-family: var(--font-mono);
   font-size: 28px;
-  font-weight: 700;
-  margin: 4px 0 8px;
+  font-weight: var(--weight-bold);
+  margin: var(--space-1) 0 var(--space-2);
   display: flex;
   align-items: baseline;
   gap: 6px;
+  font-variant-numeric: tabular-nums;
 }
 
 .index-card__delta {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
   padding: 1px 6px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 .delta--up {
-  color: var(--color-bull, #16a34a);
-  background: var(--bg-bull-soft, #dcfce7);
+  color: var(--color-success);
+  background: var(--color-success-soft);
 }
 
 .delta--down {
-  color: var(--color-bear, #dc2626);
-  background: var(--bg-bear-soft, #fee2e2);
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
 }
 
 .index-card__badges {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: 4px;
+  margin-top: var(--space-1);
 }
 
 .badge {
   font-size: 11px;
   padding: 2px 6px;
-  border-radius: 4px;
-  font-weight: 500;
+  border-radius: var(--radius-sm);
+  font-weight: var(--weight-medium);
 }
 
 .badge--bull {
-  color: var(--color-bull, #16a34a);
-  background: var(--bg-bull-soft, #dcfce7);
+  color: var(--color-success);
+  background: var(--color-success-soft);
 }
 
 .badge--bear {
-  color: var(--color-bear, #dc2626);
-  background: var(--bg-bear-soft, #fee2e2);
+  color: var(--color-danger);
+  background: var(--color-danger-soft);
 }
 
 .badge--panic {
-  color: #fff;
-  background: var(--color-bear, #dc2626);
-  font-weight: 600;
+  color: var(--color-text-inverse);
+  background: var(--color-danger);
+  font-weight: var(--weight-semibold);
 }
 
 .badge--euph {
-  color: #fff;
-  background: var(--color-bull, #16a34a);
-  font-weight: 600;
+  color: var(--color-text-inverse);
+  background: var(--color-success);
+  font-weight: var(--weight-semibold);
 }
 
 .index-card__hint {
-  margin-top: 6px;
+  margin-top: var(--space-1);
   font-size: 11px;
-  color: var(--text-tertiary, #9ca3af);
-  font-style: italic;
+  color: var(--color-text-tertiary);
 }
 </style>

@@ -28,6 +28,8 @@ export default defineConfig({
         manualChunks: {
           'element-plus': ['element-plus'],
           vue: ['vue', 'vue-router', 'pinia'],
+          echarts: ['echarts', 'vue-echarts'],
+          axios: ['axios'],
         },
       },
     },

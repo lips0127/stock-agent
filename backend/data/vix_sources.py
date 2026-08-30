@@ -101,6 +101,12 @@ ETF_WEIGHTS = {
 BROAD_ETFS = ("50etf", "300etf", "500etf")
 GROWTH_ETFS = ("cyb", "kcb")
 
+# 大盘 vs 小盘分组（v8：分离观测恐慌程度）。
+# 大盘 = 50ETF + 300ETF（沪深300权重股，期权流动性最深）；
+# 小盘 = 500ETF + 创业板 + 科创50（中盘+成长，波动更大、情绪更敏感）。
+LARGE_ETFS = ("50etf", "300etf")
+SMALL_ETFS = ("500etf", "cyb", "kcb")
+
 
 def _weighted_last(close_wide: pd.DataFrame, keys, row_idx: int = -1) -> Optional[float]:
     """对 close_wide（列=ETF key）某一行取加权平均，权重按可用列重新归一化。"""
@@ -204,12 +210,28 @@ def fetch_multi_etf_qvix(days: int = 60, as_of: Optional[str] = None) -> Optiona
     growth = _weighted_last(close_wide, GROWTH_ETFS, -1)
     growth_premium = round(growth - broad, 2) if (growth is not None and broad is not None) else None
 
+    # v8 大盘/小盘分离轨道（各自加权 VIX + prev/prev2，用于变化率与 Z-Score）
+    large = _weighted_last(close_wide, LARGE_ETFS, -1)
+    large_prev = _weighted_last(close_wide, LARGE_ETFS, -2) if len(close_wide) >= 2 else None
+    large_prev2 = _weighted_last(close_wide, LARGE_ETFS, -3) if len(close_wide) >= 3 else None
+    small = _weighted_last(close_wide, SMALL_ETFS, -1)
+    small_prev = _weighted_last(close_wide, SMALL_ETFS, -2) if len(close_wide) >= 2 else None
+    small_prev2 = _weighted_last(close_wide, SMALL_ETFS, -3) if len(close_wide) >= 3 else None
+    small_large_premium = round(small - large, 2) if (small is not None and large is not None) else None
+
     # 跨 ETF 波动冲击强度：单 ETF 振幅% 按权重加权（已是百分比，无需再除 close）
-    swing_pct = None
-    if latest_swing:
-        wsum = sum(ETF_WEIGHTS[k] for k in latest_swing)
-        if wsum > 0:
-            swing_pct = round(sum(ETF_WEIGHTS[k] * s for k, s in latest_swing.items()) / wsum, 2)
+    # v8：按大盘/小盘集合分别加权，供两条轨道各自的 swing_score
+    def _set_swing(keys):
+        pairs = [(ETF_WEIGHTS[k], latest_swing[k]) for k in keys
+                 if k in latest_swing and pd.notna(latest_swing.get(k))]
+        wsum = sum(w for w, _ in pairs)
+        if wsum <= 0 or not pairs:
+            return None
+        return round(sum(w * s for w, s in pairs) / wsum, 2)
+
+    swing_pct = _set_swing(ETF_WEIGHTS.keys())
+    large_swing = _set_swing(LARGE_ETFS)
+    small_swing = _set_swing(SMALL_ETFS)
 
     return {
         **{k: round(v, 2) for k, v in latest_close.items()},
@@ -219,7 +241,16 @@ def fetch_multi_etf_qvix(days: int = 60, as_of: Optional[str] = None) -> Optiona
         "broad": broad,
         "growth": growth,
         "growth_premium": growth_premium,
+        "large": large,
+        "large_prev": large_prev,
+        "large_prev2": large_prev2,
+        "small": small,
+        "small_prev": small_prev,
+        "small_prev2": small_prev2,
+        "small_large_premium": small_large_premium,
         "swing_pct": swing_pct,
+        "large_swing": large_swing,
+        "small_swing": small_swing,
         "count": len(latest_close),
         "source": "multi_etf",
     }
@@ -236,8 +267,13 @@ ZZ1000_SYMBOL = "sh000852"
 SH_COMPOSITE_SYMBOL = "sh000001"
 
 
-def fetch_index_daily(symbol: str, days: int = 90) -> Optional[pd.DataFrame]:
-    """拉取指数日线 OHLC。复用 akshare stock_zh_index_daily 接口。"""
+def fetch_index_daily(symbol: str, days: int = 90,
+                      as_of: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """拉取指数日线 OHLC。复用 akshare stock_zh_index_daily 接口。
+
+    as_of（YYYY-MM-DD）：回填历史日 d 时必须传入，截断到 date <= as_of，
+    保证 RV 等派生量 point-in-time（不混入 d 之后的数据）。默认 None=截至最新。
+    """
     df = _cached_raw(f"idx_daily:{symbol}", lambda: ak_stock_zh_index_daily(symbol=symbol))
     if df is None or df.empty:
         return None
@@ -262,15 +298,21 @@ def fetch_index_daily(symbol: str, days: int = 90) -> Optional[pd.DataFrame]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     cutoff = (datetime.now() - timedelta(days=days + 5)).strftime("%Y-%m-%d")
-    return df[df["date"] >= cutoff][["date", "open", "high", "low", "close"]].dropna().reset_index(drop=True)
+    out = df[df["date"] >= cutoff]
+    if as_of:
+        out = out[out["date"] <= as_of]
+    return out[["date", "open", "high", "low", "close"]].dropna().reset_index(drop=True)
 
 
-def fetch_index_daily_tx(symbol: str, days: int = 400) -> Optional[pd.DataFrame]:
+def fetch_index_daily_tx(symbol: str, days: int = 400,
+                         as_of: Optional[str] = None) -> Optional[pd.DataFrame]:
     """腾讯财经指数日线（兜底数据源，覆盖更长历史）。
 
     akshare stock_zh_index_daily 在 2024-2025 数据窗口只有 ~200 行，无法形成 ma60；
     腾讯接口 stock_zh_index_daily_tx 返回自 1990 起的全量历史，能稳定支持 250 天回填。
 
+    as_of（YYYY-MM-DD）：回填历史日 d 时传入，截断到 date <= as_of，保证 ma60/动量/
+    新高等 trailing 派生量 point-in-time。默认 None=截至最新。
     带 60s TTL 的进程内缓存：腾讯接口返回的是同一份全量历史（与 days 无关），
     回填 250 天时若每天重拉一次约 50s/次 → 总耗时 4h。缓存后整轮回填只拉一次。
     """
@@ -297,7 +339,10 @@ def fetch_index_daily_tx(symbol: str, days: int = 400) -> Optional[pd.DataFrame]
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     cutoff = (datetime.now() - timedelta(days=days + 5)).strftime("%Y-%m-%d")
-    return df[df["date"] >= cutoff][["date", "open", "high", "low", "close"]].dropna().reset_index(drop=True)
+    out = df[df["date"] >= cutoff]
+    if as_of:
+        out = out[out["date"] <= as_of]
+    return out[["date", "open", "high", "low", "close"]].dropna().reset_index(drop=True)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -380,10 +425,12 @@ def fetch_north_net_flow(date_str: str) -> Optional[dict]:
 # ─────────────────────────────────────────────────────────────────
 
 
-def fetch_margin_balance() -> Optional[dict]:
+def fetch_margin_balance(as_of: Optional[str] = None) -> Optional[dict]:
     """全市场融资融券余额合计（亿元）。
 
     数据源 macro_china_market_margin_sh / sz，单位是"元"，需 /1e8 转亿。
+    as_of（YYYY-MM-DD）：回填历史日 d 时传入，取 date <= as_of 的最后一行，
+    保证 point-in-time（否则 iloc[-1] 永远是今天，污染历史快照）。
     """
     total = 0.0
     found = False
@@ -398,7 +445,17 @@ def fetch_margin_balance() -> Optional[dict]:
                 break
         if col is None:
             continue
-        val = pd.to_numeric(df[col].iloc[-1], errors="coerce")
+        sub = df
+        if as_of:
+            # 找日期列（中文"日期"或英文 date），截断到 <= as_of 后取最后一行
+            date_col = next((c for c in df.columns
+                             if str(c).lower() in ("date", "日期")), None)
+            if date_col is not None:
+                sub = df[pd.to_datetime(df[date_col], errors="coerce")
+                         .dt.strftime("%Y-%m-%d") <= as_of]
+                if sub.empty:
+                    continue
+        val = pd.to_numeric(sub[col].iloc[-1], errors="coerce")
         if pd.isna(val):
             continue
         total += float(val)
@@ -578,15 +635,18 @@ def compute_spot_signals_from_df(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     return df
 
 
-def get_spot_signals_for_date(target_date: str, days: int = 400) -> Optional[dict]:
-    """便捷函数：拉上证综指日线 → 计算现货信号 → 提取 target_date 那一行。
+def get_spot_signals_for_date(target_date: str, days: int = 400,
+                              symbol: str = SH_COMPOSITE_SYMBOL) -> Optional[dict]:
+    """便捷函数：拉指定指数日线 → 计算现货信号 → 提取 target_date 那一行。
 
+    symbol：v8 大小盘分离——大盘传 HS300_SYMBOL、小盘传 ZZ1000_SYMBOL；
+    默认上证综指（向后兼容旧调用方）。
     使用腾讯 stock_zh_index_daily_tx 接口（自 1990 起全量历史），
     比 em 接口 (akshare stock_zh_index_daily) 数据窗口长，能稳定形成 ma60。
     返回 dict 含 close/ma60_dev/mom_5d/mom_20d/new_high_ratio_20d；
     任何一步失败或日期不在窗口内返回 None。
     """
-    df = fetch_index_daily_tx(SH_COMPOSITE_SYMBOL, days=days)
+    df = fetch_index_daily_tx(symbol, days=days)
     if df is None or df.empty:
         return None
     df = compute_spot_signals_from_df(df)

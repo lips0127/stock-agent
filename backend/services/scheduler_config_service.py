@@ -15,7 +15,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from backend.config import (
     SCHEDULER_HOUR, SCHEDULER_MINUTE,
-    ZHIHU_CHECK_INTERVAL_HOURS, GUBA_PREFETCH_INTERVAL_HOURS,
+    GUBA_PREFETCH_INTERVAL_HOURS,
     UNIVERSE_CONSTITUENT_REFRESH_DOW,
     UNIVERSE_CONSTITUENT_REFRESH_HOUR, UNIVERSE_CONSTITUENT_REFRESH_MINUTE,
     UNIVERSE_CRAWL_HOUR, UNIVERSE_CRAWL_MINUTE,
@@ -23,6 +23,7 @@ from backend.config import (
 )
 from backend.core.database import (
     get_all_scheduler_configs, get_scheduler_config, seed_scheduler_config_if_absent,
+    delete_scheduler_configs_not_in,
     update_scheduler_config, update_scheduler_next_run,
 )
 
@@ -85,14 +86,6 @@ JOB_REGISTRY: list[dict[str, Any]] = [
         "env_fields": lambda: dict(hour=16, minute=35, day_of_week="mon-fri"),
     },
     {
-        "job_id": "zhihu_check",
-        "display_name": "知乎大V 监控",
-        "description": "每 N 小时检查 KOL 动态 + LLM 分析 + 邮件通知",
-        "trigger_type": "interval",
-        "func_name": "zhihu_check_task",
-        "env_fields": lambda: dict(interval_hours=ZHIHU_CHECK_INTERVAL_HOURS),
-    },
-    {
         "job_id": "forum_prefetch",
         "display_name": "股吧帖子预拉",
         "description": "每 N 小时拉一次股吧列表（不调 LLM，guba 熔断保护）",
@@ -140,7 +133,10 @@ JOB_REGISTRY_BY_ID = {j["job_id"]: j for j in JOB_REGISTRY}
 # ── seed / build ──
 
 def seed_from_env() -> int:
-    """启动时调一次：把 10 行 INSERT OR IGNORE 写进 DB（已有行不覆盖）。"""
+    """启动时调一次：把任务配置 INSERT OR IGNORE 写进 DB（已有行不覆盖）。
+
+    同时清理注册表之外的遗留配置行（模块移除后残留的 job）。
+    """
     n = 0
     for job in JOB_REGISTRY:
         fields = job["env_fields"]()
@@ -157,6 +153,9 @@ def seed_from_env() -> int:
             logger.info(f"seed scheduler_task_config: {job['job_id']}")
     if n:
         logger.info(f"scheduler_task_config: 新增 {n} 行（其余 {len(JOB_REGISTRY) - n} 行已存在）")
+    pruned = delete_scheduler_configs_not_in([j["job_id"] for j in JOB_REGISTRY])
+    if pruned:
+        logger.info(f"scheduler_task_config: 清理 {pruned} 行已注销 job 的遗留配置")
     return n
 
 

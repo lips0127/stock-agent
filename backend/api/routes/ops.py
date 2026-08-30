@@ -12,18 +12,35 @@ ops_bp = Blueprint("ops", __name__)
 logger = logging.getLogger(__name__)
 
 
-def _run_with_task_lifecycle(task_runner_id, scan_func, error_prefix):
+def _run_with_task_lifecycle(task_runner_id, scan_func, error_prefix, kind="scan_full"):
     """
     统一的任务生命周期管理（Phase A 增强, 2026-06-10）：
     - 检查锁，避免并发扫描
     - 在 TaskRunner 上下文里执行扫描函数
     - 任务内对数据库的 update_scan_task 调用会作为 info 日志记录
+
+    锁被占用时必须给客户端已拿到的 task_id 一个终态：task_id 在触发接口里
+    已经返回，如果这里静默 return，前端会轮询一个永远不存在的任务（幽灵任务）。
     """
+    from datetime import datetime
+
+    from backend.core.database import insert_task_run
     from backend.services.scheduler import _scan_lock, _scan_running
 
     with _scan_lock:
         if _scan_running:
-            logger.error(f"{error_prefix} (task_runner_id={task_runner_id}): 锁已被占用，放弃执行")
+            now = datetime.now().isoformat()
+            logger.error(f"{error_prefix} (task_runner_id={task_runner_id}): 锁已被占用，标记任务失败")
+            insert_task_run(
+                id=task_runner_id,
+                kind=kind,
+                title=error_prefix,
+                status="failed",
+                triggered_by="user",
+                started_at=now,
+                finished_at=now,
+                error_message="已有扫描任务正在运行，本次触发未执行（并发冲突）",
+            )
             return
         _scan_running = True
 
@@ -63,7 +80,7 @@ def index_scan():
 
     thread = threading.Thread(
         target=_run_with_task_lifecycle,
-        args=(task_id, do_scan, "红利指数扫描失败"),
+        args=(task_id, do_scan, "红利指数扫描失败", "scan_index"),
     )
     thread.start()
     return jsonify({"message": "红利指数扫描已启动", "task_id": task_id}), 200
@@ -95,7 +112,7 @@ def full_refresh_data():
 
     thread = threading.Thread(
         target=_run_with_task_lifecycle,
-        args=(task_id, do_scan, "后台全市场扫描失败"),
+        args=(task_id, do_scan, "后台全市场扫描失败", "scan_full"),
     )
     thread.start()
     return jsonify({"message": "Full market scan started", "task_id": task_id}), 200

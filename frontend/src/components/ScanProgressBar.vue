@@ -183,7 +183,7 @@ function goProgress() {
 }
 .scan-bar__fill {
   height: 100%;
-  background: linear-gradient(90deg, #4f46e5 0%, #818cf8 100%);
+  background: var(--color-accent);
   border-radius: var(--radius-full);
   transition: width var(--duration-page) var(--ease);
 }

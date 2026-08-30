@@ -1,6 +1,22 @@
 <template>
   <div class="app-layout">
-    <aside class="app-sidebar">
+    <!-- 移动端顶栏：仅窄屏显示 -->
+    <header class="mobile-topbar">
+      <button class="mobile-topbar__menu" aria-label="打开导航" @click="sidebarOpen = true">
+        <el-icon :size="20"><Menu /></el-icon>
+      </button>
+      <div class="mobile-topbar__logo" @click="$router.push('/dashboard')">
+        <span class="logo__mark">Q</span>
+        <span class="logo__text">QuantLab</span>
+      </div>
+    </header>
+
+    <!-- 遮罩：窄屏侧栏打开时显示 -->
+    <transition name="fade">
+      <div v-if="sidebarOpen" class="app-backdrop" @click="sidebarOpen = false" />
+    </transition>
+
+    <aside class="app-sidebar" :class="{ 'app-sidebar--open': sidebarOpen }">
       <div class="sidebar-header">
         <div class="logo" @click="$router.push('/dashboard')">
           <span class="logo__mark">Q</span>
@@ -17,6 +33,7 @@
             :to="item.path"
             class="nav-item"
             :class="{ 'is-active': isActive(item) }"
+            @click="sidebarOpen = false"
           >
             <el-icon class="nav-item__icon" :size="16"><component :is="item.icon" /></el-icon>
             <span class="nav-item__label">{{ item.label }}</span>
@@ -56,17 +73,18 @@
 </template>
 
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed, ref, watch, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useTaskStore } from '../stores/task'
 import {
   ArrowDown,
   SwitchButton,
+  Menu,
   DataBoard,
   Search,
+  Star,
   ChatDotRound,
-  User,
   TrendCharts,
   Timer,
   Document,
@@ -79,11 +97,16 @@ const route = useRoute()
 const auth = useAuthStore()
 const taskStore = useTaskStore()
 
+const sidebarOpen = ref(false)
+// 路由变化时收起移动端抽屉
+watch(() => route.path, () => { sidebarOpen.value = false })
+
 const navGroups = [
   {
-    label: '辅助交易',
+    label: '市场研究',
     items: [
       { path: '/dashboard', label: '仪表盘', icon: DataBoard },
+      { path: '/watchlist', label: '自选股', icon: Star },
       { path: '/stocks', label: '全量扫描', icon: Search },
       { path: '/dividend-index', label: '红利指数', icon: Coin },
     ],
@@ -92,8 +115,7 @@ const navGroups = [
     label: '辅助功能',
     items: [
       { path: '/sentiment', label: '舆情监控', icon: ChatDotRound },
-      { path: '/vix', label: 'VIX 恐慌指数', icon: TrendCharts },
-      { path: '/zhihu', label: '知乎大V', icon: User },
+      { path: '/vix', label: '恐慌贪婪指数', icon: TrendCharts },
       { path: '/financial-report', label: '财报解析', icon: Document },
     ],
   },
@@ -134,7 +156,7 @@ onMounted(() => {
   background: var(--color-bg-page);
 }
 
-/* ── 侧边栏：毛玻璃 + Vercel 风格激活条 ── */
+/* ── 侧边栏：实色面板 + 右沿 1px 分层（数据工具不用玻璃拟态） ── */
 .app-sidebar {
   width: var(--layout-sidebar-width);
   height: 100vh;
@@ -144,10 +166,8 @@ onMounted(() => {
   z-index: var(--z-sticky);
   display: flex;
   flex-direction: column;
-  background: var(--color-bg-glass);
-  backdrop-filter: blur(16px) saturate(180%);
-  -webkit-backdrop-filter: blur(16px) saturate(180%);
-  border-right: 1px solid transparent;
+  background: var(--color-bg-elevated);
+  border-right: 1px solid var(--color-border);
   box-shadow: var(--shadow-sidebar);
   user-select: none;
 }
@@ -157,7 +177,7 @@ onMounted(() => {
   border-bottom: 1px solid var(--color-divider);
 }
 
-/* ── Logo：克制 indigo 单色渐变 + 微光晕 ── */
+/* ── Logo：实色主色方块，无渐变无光晕 ── */
 .logo {
   display: flex;
   align-items: center;
@@ -171,16 +191,14 @@ onMounted(() => {
   width: 30px;
   height: 30px;
   border-radius: var(--radius-md);
-  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
-  color: #fff;
+  background: var(--color-accent);
+  color: var(--color-text-inverse);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: var(--weight-bold);
   letter-spacing: -0.02em;
-  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.32),
-              inset 0 1px 0 rgba(255, 255, 255, 0.15);
 }
 .logo__text {
   font-size: var(--text-md);
@@ -237,7 +255,6 @@ onMounted(() => {
 .nav-item:hover {
   color: var(--color-text-primary);
   background: var(--color-bg-muted);
-  transform: translateX(1px);
 }
 .nav-item.is-active {
   color: var(--color-accent-deep);
@@ -291,8 +308,6 @@ onMounted(() => {
   font-size: 12px;
   font-weight: var(--weight-semibold);
   flex-shrink: 0;
-  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.1),
-              0 1px 3px rgba(0, 0, 0, 0.12);
   letter-spacing: -0.01em;
 }
 .user-chip__name {
@@ -317,6 +332,73 @@ onMounted(() => {
   flex: 1;
   margin-left: var(--layout-sidebar-width);
   min-height: 100vh;
+  min-width: 0;   /* flex 子项默认 min-width:auto，宽表格会把整页撑出横向滚动 */
   padding: var(--space-6) var(--space-8);
+}
+
+/* ── 移动端：≤1024px 侧栏收进抽屉 ── */
+.mobile-topbar {
+  display: none;
+}
+.app-backdrop {
+  display: none;
+}
+
+@media (max-width: 1024px) {
+  .app-main {
+    margin-left: 0;
+    padding: 68px var(--space-4) var(--space-8); /* 顶部让位给固定顶栏 */
+  }
+
+  .mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 52px;
+    padding: 0 var(--space-4);
+    z-index: calc(var(--z-sticky) + 2);
+    background: var(--color-bg-elevated);
+    border-bottom: 1px solid var(--color-divider);
+  }
+  .mobile-topbar__menu {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border: none;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--color-text-primary);
+    cursor: pointer;
+  }
+  .mobile-topbar__menu:hover { background: var(--color-bg-muted); }
+  .mobile-topbar__logo {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    cursor: pointer;
+  }
+
+  .app-sidebar {
+    transform: translateX(-100%);
+    transition: transform var(--duration-slow) var(--ease);
+    z-index: calc(var(--z-modal) - 1);
+  }
+  .app-sidebar--open {
+    transform: translateX(0);
+  }
+
+  .app-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: calc(var(--z-modal) - 2);
+    background: rgba(15, 15, 15, 0.32);
+  }
 }
 </style>

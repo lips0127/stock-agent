@@ -23,9 +23,6 @@ task_logs = []
 _scan_lock = threading.Lock()
 _scan_running = False
 
-_zhihu_lock = threading.Lock()
-_zhihu_running = False
-
 _forum_prefetch_lock = threading.Lock()
 _forum_prefetch_running = False
 
@@ -143,53 +140,6 @@ def daily_sentiment_task():
         raise
 
 
-@track_run("zhihu_check")
-def zhihu_check_task():
-    """知乎大V更新检查任务（默认每 2h）。"""
-    global _zhihu_running
-    with _zhihu_lock:
-        if _zhihu_running:
-            log_message("Zhihu check already running, skipping")
-            return "skipped"
-        _zhihu_running = True
-    try:
-        from backend.services.zhihu_service import refresh_user
-        from backend.services.zhihu_analyzer import analyze_new_posts
-        from backend.core.database import get_zhihu_users, get_zhihu_user_by_token
-        from backend.services.email_service import notify_new_analysis
-
-        users = get_zhihu_users(enabled_only=True)
-        if not users:
-            log_message("知乎检查: 无启用监控的用户")
-            return
-
-        log_message(f"知乎检查开始: {len(users)} 个用户")
-        for u in users:
-            try:
-                r = refresh_user(u["url_token"], max_pages=1)
-                new_n = r.get("new_posts", 0)
-                if new_n > 0:
-                    # 跑 LLM 分析
-                    results = analyze_new_posts(url_token=u["url_token"], limit=new_n + 2)
-                    if results:
-                        sent, skipped, msg = notify_new_analysis(
-                            u["url_token"], u.get("display_name") or u["url_token"], results
-                        )
-                        logger.info(f"知乎 {u['url_token']} 邮件: sent={sent} skipped={skipped} {msg}")
-                logger.info(f"知乎 {u['url_token']}: fetched={r.get('fetched')} new={new_n}")
-            except Exception as e:
-                logger.error(f"知乎刷新 {u['url_token']} 失败: {e}", exc_info=True)
-            time.sleep(1.5)
-        log_message("知乎检查完成")
-    except Exception as e:
-        logger.error(f"知乎检查任务失败: {e}", exc_info=True)
-        log_message(f"知乎检查失败: {e}")
-        raise
-    finally:
-        with _zhihu_lock:
-            _zhihu_running = False
-
-
 @track_run("daily_vix")
 def daily_vix_task():
     """每日 VIX 恐慌指数 + 恐惧贪婪综合指数计算（收盘后 16:30）。"""
@@ -206,6 +156,7 @@ def daily_vix_task():
             if snap:
                 log_message(
                     f"VIX 计算完成: date={snap.date} "
+                    f"恐慌贪婪指数={snap.fear_greed_v7} "
                     f"大盘(VIX={snap.large_vix} FG={snap.large_fg} {snap.large_regime}) "
                     f"小盘(VIX={snap.small_vix} FG={snap.small_fg} {snap.small_regime})"
                 )
@@ -488,7 +439,6 @@ _TASK_FUNCS = {
     "daily_tenbag_scan_task": daily_tenbag_scan_task,
     "daily_top_picks_task": daily_top_picks_task,
     "daily_indicators_recompute_task": daily_indicators_recompute_task,
-    "zhihu_check_task": zhihu_check_task,
     "forum_prefetch_task": forum_prefetch_task,
     "weekly_universe_constituents_task": weekly_universe_constituents_task,
     "daily_universe_crawl_task": daily_universe_crawl_task,
@@ -527,9 +477,7 @@ def init_scheduler():
             logger.warning(f"未知 func_name: {reg['func_name']}, 跳过 {job_id}")
             continue
         trigger = build_trigger(row)
-        # forum_prefetch 启动后立刻跑一次（guba 列表页不依赖 cookie，可 warm 缓存）；
-        # zhihu_check 不再启动即跑 —— 反爬 403 会刷屏，且熔断器会在首跑打满后静默，
-        # 改走正常调度（默认 2h/3h 一次），避免每次重启都砸一片 403 日志。
+        # forum_prefetch 启动后立刻跑一次（guba 列表页不依赖 cookie，可 warm 缓存）。
         next_run = datetime.now() if job_id == "forum_prefetch" else None
         _scheduler.add_job(func, trigger, id=job_id, next_run_time=next_run)
         n_added += 1

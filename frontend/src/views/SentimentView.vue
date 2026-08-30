@@ -94,7 +94,7 @@
           <span class="alert-dot" /> {{ circuitBadge.text }}（点击重置）
         </div>
         <div v-if="cookieStale" class="alert-chip alert-chip--stale">
-          ⚠ 帖子正文抓取可能失效：guba cookie 疑似过期，需更新 _GUBA_BOOTSTRAP_COOKIES 后重启
+          帖子正文抓取可能失效：guba cookie 疑似过期，需更新 _GUBA_BOOTSTRAP_COOKIES 后重启
         </div>
       </div>
     </ModernCard>
@@ -128,11 +128,11 @@
               {{ batchProgress.currentName }}
             </span>
             <span v-if="batchProgress.stuck" class="batch-progress__stuck" :title="'单只股票卡住超过 60 秒，后端将自动跳过'">
-              ⚠️ 卡住中
+              已卡住
             </span>
           </span>
           <span v-else-if="!batchProgress.running" class="batch-progress__done">
-            ✅ 已完成，3 秒后自动收起
+            已完成，3 秒后自动收起
           </span>
         </div>
       </div>
@@ -178,7 +178,7 @@
                 >
                   <div class="config-item__info">
                     <span class="config-item__code">{{ cfg.stock_code }}</span>
-                    <span class="config-item__name">{{ cfg.stock_name || '—' }}</span>
+                    <span class="config-item__name">{{ cfg.stock_name || '-' }}</span>
                   </div>
                   <el-button type="danger" link size="small" @click="handleDelete(cfg.id)">
                     删除
@@ -213,7 +213,7 @@
                       <div class="sentiment-main">
                         <div class="sentiment-info">
                           <span class="stock-code">{{ item.stock_code }}</span>
-                          <span class="stock-name">{{ item.stock_name || '—' }}</span>
+                          <span class="stock-name">{{ item.stock_name || '-' }}</span>
                           <span
                             v-if="trendOf(item)"
                             class="trend-pill"
@@ -227,7 +227,7 @@
                             class="stance-pill"
                             :class="`stance-pill--${stanceKey(item.sentiment)}`"
                           >{{ item.sentiment }}</span>
-                          <span v-else class="text-muted">—</span>
+                          <span v-else class="text-muted">-</span>
                           <span
                             v-if="item.score != null"
                             class="score-num"
@@ -343,7 +343,7 @@
                                 class="audit-pill audit-pill--warn"
                                 :title="`${auditOf(item).mismatched} 条标题与实际页面不一致`"
                               >
-                                ⚠ {{ auditOf(item).mismatched }} 不一致
+                                {{ auditOf(item).mismatched }} 条不一致
                               </span>
                               <a
                                 v-if="item.guba_url"
@@ -520,7 +520,7 @@
                 :class="p.score == null ? 'top-pick-sentiment--empty' : `top-pick-sentiment--${stanceKey(p.sentiment)}`"
                 :title="p.sentiment_date ? `${p.sentiment_date} · ${p.summary || ''}` : '尚未生成情绪因子'"
               >
-                {{ p.score == null ? '待分析' : `${p.sentiment || '—'} ${p.score}` }}
+                {{ p.score == null ? '待分析' : `${p.sentiment || '-'} ${p.score}` }}
               </span>
             </div>
           </div>
@@ -538,7 +538,7 @@
               class="extreme-row"
             >
               <span class="extreme-code">{{ sig.stock_code }}</span>
-              <span class="extreme-name">{{ sig.stock_name || '—' }}</span>
+              <span class="extreme-name">{{ sig.stock_name || '-' }}</span>
               <span class="extreme-score">{{ Number(sig.score).toFixed(0) }}</span>
               <span
                 v-if="sig.panic_signal"
@@ -583,7 +583,7 @@
                   <div class="sentiment-main">
                     <div class="sentiment-info">
                       <span class="stock-code">{{ item.stock_code }}</span>
-                      <span class="stock-name">{{ item.stock_name || '—' }}</span>
+                      <span class="stock-name">{{ item.stock_name || '-' }}</span>
                     </div>
                     <div class="sentiment-score-wrap">
                       <span
@@ -591,7 +591,7 @@
                         class="stance-pill"
                         :class="`stance-pill--${stanceKey(item.sentiment)}`"
                       >{{ item.sentiment }}</span>
-                      <span v-else class="text-muted">—</span>
+                      <span v-else class="text-muted">-</span>
                       <span
                         v-if="item.score != null"
                         class="score-num"
@@ -643,7 +643,7 @@
             {{ auditIcon(postDialogPost) }}
           </span>
           <span class="post-dialog__author">{{ postDialogPost.author || '匿名' }}</span>
-          <span class="post-dialog__time">{{ postDialogPost.post_time || '—' }}</span>
+          <span class="post-dialog__time">{{ postDialogPost.post_time || '-' }}</span>
         </div>
         <div
           v-if="postDialogPost.actual_title && postDialogPost.actual_title !== postDialogPost.title"
@@ -1116,7 +1116,7 @@ function trendOf(item) {
   const delta = item.score - prev
   if (delta > 0) return { dir: 'up', icon: '▲', delta }
   if (delta < 0) return { dir: 'down', icon: '▼', delta }
-  return { dir: 'flat', icon: '—', delta }
+  return { dir: 'flat', icon: '-', delta }
 }
 function historyOf(code) {
   return historyByCode.value[code] || []
@@ -1158,7 +1158,7 @@ function sentimentMarkers(code) {
     } else {
       // 普通日：按 sentiment 给色
       const color = h.sentiment === '乐观' ? '#f97316'
-        : h.sentiment === '悲观' ? '#6366f1'
+        : h.sentiment === '悲观' ? '#2563eb'
         : '#94a3b8'
       markers.push({
         date: h.date, value: h.score, kind: 'normal', color,
@@ -1613,14 +1613,14 @@ onUnmounted(() => stopBatchPolling())
   white-space: nowrap;
 }
 .job-chip--ok {
-  background: rgba(16, 185, 129, 0.10);
-  color: var(--color-up);
-  border-color: rgba(16, 185, 129, 0.20);
+  background: var(--color-success-soft);
+  color: var(--color-success);
+  border-color: rgba(4, 120, 87, 0.22);
 }
 .job-chip--danger {
-  background: rgba(225, 29, 72, 0.10);
-  color: var(--color-down);
-  border-color: rgba(225, 29, 72, 0.22);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  border-color: rgba(220, 38, 38, 0.22);
 }
 .job-chip--warn {
   background: rgba(245, 158, 11, 0.10);
@@ -1673,12 +1673,12 @@ onUnmounted(() => stopBatchPolling())
 }
 .circuit-badge--danger {
   background: rgba(239, 68, 68, 0.12);
-  color: var(--color-down, #ef4444);
+  color: var(--color-danger);
   border-color: rgba(239, 68, 68, 0.25);
   animation: pulse-danger 1.6s ease-in-out infinite;
 }
 .circuit-badge--danger .circuit-dot {
-  background: var(--color-down, #ef4444);
+  background: var(--color-danger);
   box-shadow: 0 0 8px rgba(239, 68, 68, 0.7);
 }
 @keyframes pulse-danger {
@@ -1741,7 +1741,7 @@ onUnmounted(() => stopBatchPolling())
 }
 .sentiment-row--active {
   border-color: var(--color-accent);
-  box-shadow: var(--shadow-glow);
+  box-shadow: var(--shadow-md);
 }
 .sentiment-summary {
   padding: var(--space-3) var(--space-4);
@@ -2193,7 +2193,7 @@ onUnmounted(() => stopBatchPolling())
 }
 .signal-badge--panic {
   background: rgba(239, 68, 68, 0.12);
-  color: var(--color-down, #ef4444);
+  color: var(--color-danger);
   border: 1px solid rgba(239, 68, 68, 0.3);
 }
 .signal-badge--euphoria {
@@ -2294,14 +2294,14 @@ onUnmounted(() => stopBatchPolling())
   white-space: nowrap;
 }
 .top-pick-sentiment--bull {
-  background: rgba(16, 185, 129, 0.10);
+  background: rgba(225, 29, 72, 0.10);
   color: var(--color-up);
-  border-color: rgba(16, 185, 129, 0.22);
+  border-color: rgba(225, 29, 72, 0.22);
 }
 .top-pick-sentiment--bear {
-  background: rgba(225, 29, 72, 0.10);
+  background: rgba(16, 185, 129, 0.10);
   color: var(--color-down);
-  border-color: rgba(225, 29, 72, 0.22);
+  border-color: rgba(16, 185, 129, 0.22);
 }
 .top-pick-sentiment--neutral {
   background: rgba(245, 158, 11, 0.10);
@@ -2321,7 +2321,7 @@ onUnmounted(() => stopBatchPolling())
   text-align: center;
   color: var(--color-text-tertiary);
 }
-.post-dialog__error { color: var(--color-down, #ef4444); }
+.post-dialog__error { color: var(--color-danger); }
 .post-dialog__meta {
   display: flex;
   align-items: center;
@@ -2414,7 +2414,7 @@ onUnmounted(() => stopBatchPolling())
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--color-accent, #6366f1);
+  background: var(--color-accent);
   position: relative;
 }
 .batch-progress__pulse::after {
@@ -2422,7 +2422,7 @@ onUnmounted(() => stopBatchPolling())
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  background: var(--color-accent, #6366f1);
+  background: var(--color-accent);
   animation: pulse-ring 1.8s var(--ease) infinite;
   z-index: -1;
 }
@@ -2442,7 +2442,7 @@ onUnmounted(() => stopBatchPolling())
 }
 .batch-progress__count .muted { color: var(--color-text-tertiary); }
 .batch-progress__count .warn {
-  color: var(--color-down, #e11d48);
+  color: var(--color-danger);
   font-weight: var(--weight-semibold);
   margin-left: 6px;
 }
@@ -2580,7 +2580,7 @@ onUnmounted(() => stopBatchPolling())
 }
 .alert-chip--danger {
   background: rgba(239, 68, 68, 0.12);
-  color: var(--color-down);
+  color: var(--color-danger);
   border-color: rgba(239, 68, 68, 0.28);
 }
 .alert-chip--stale {

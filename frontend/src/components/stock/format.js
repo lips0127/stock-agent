@@ -70,5 +70,5 @@ export function sentimentLabel(s) {
   if (s === 'bullish' || s === '乐观') return '看多'
   if (s === 'bearish' || s === '悲观') return '看空'
   if (s === 'neutral' || s === '中性') return '中性'
-  return s || '—'
+  return s || '-'
 }

@@ -9,8 +9,28 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+class _InlineThread:
+    """Thread test double that keeps the worker inside the mock lifetime."""
+
+    def __init__(self, target=None, args=(), kwargs=None, **_options):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+
+    def start(self):
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
+
+    def join(self, timeout=None):
+        return None
+
+    def is_alive(self):
+        return False
 
 
 def _setup_temp_db():
@@ -33,8 +53,7 @@ class TestTenbagRoutes(unittest.TestCase):
         from backend.api.app import create_app
         from backend.api.middleware import generate_token
         os.environ["FRONTEND_DEV_PROXY"] = "false"
-        app = create_app()
-        app.config["TESTING"] = True
+        app = create_app(testing=True)
         cls.client = app.test_client()
         cls.token = generate_token("test_user")
         cls.auth = {"HTTP_AUTHORIZATION": f"Bearer {cls.token}"}
@@ -94,7 +113,6 @@ class TestTenbagRoutes(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_scan_starts_task_and_returns_id(self):
-        import unittest.mock as mock
         # mock run_scan 避免后台线程联网；让线程快速完成
         from backend.services import tenbag_scan_service as svc
         captured = {}
@@ -107,7 +125,9 @@ class TestTenbagRoutes(unittest.TestCase):
                 task_runner.complete(result={"scanned": 0})
             return {"scanned": 0, "failed": 0, "tiers": {}}
 
-        with mock.patch.object(svc, "run_scan", side_effect=_fake_run):
+        with patch.object(svc, "run_scan", side_effect=_fake_run), patch(
+            "backend.api.routes.tenbag.threading.Thread", _InlineThread,
+        ):
             r = self.client.post("/api/tenbag/scan", json={"top_n": 5},
                                  environ_overrides=self.auth)
         self.assertEqual(r.status_code, 200)
@@ -115,9 +135,6 @@ class TestTenbagRoutes(unittest.TestCase):
         self.assertIn("task_id", data)
         self.assertEqual(len(data["task_id"]), 32)
         self.assertEqual(data["top_n"], 5)
-        # 后台线程很快跑完；等一下让它执行
-        import time
-        time.sleep(0.5)
         self.assertTrue(captured.get("called"))
 
 

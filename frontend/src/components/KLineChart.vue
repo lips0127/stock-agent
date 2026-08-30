@@ -123,24 +123,24 @@ const props = defineProps({
 const emit = defineEmits(['postClick'])
 
 const DS = {
-  // Apple-style design tokens
-  textPrimary: '#1d1d1f',
-  textSecondary: '#6e6e73',
-  textTertiary: '#aeaeb2',
-  border: '#e5e5ea',
-  borderStrong: '#d1d1d6',
-  divider: '#f2f2f7',
+  // Canvas palette, hex-aligned with design-system.css tokens
+  textPrimary: '#18181b',
+  textSecondary: '#52525b',
+  textTertiary: '#71717a',
+  border: '#e4e4e7',
+  borderStrong: '#d4d4d8',
+  divider: '#f4f4f5',
   bgElevated: '#ffffff',
-  bgMuted: '#f5f5f7',
-  accent: '#0071e3',
+  bgMuted: '#f4f4f5',
+  accent: '#2563eb',
   // Candlestick colors: A-share convention (red up, green down)
-  candleUp: '#ff3b30',
-  candleDown: '#34c759',
-  candleUpBg: 'rgba(255,59,48,0.08)',
-  candleDownBg: 'rgba(52,199,89,0.08)',
+  candleUp: '#e11d48',
+  candleDown: '#059669',
+  candleUpBg: 'rgba(225,29,72,0.08)',
+  candleDownBg: 'rgba(5,150,105,0.08)',
   radiusSm: 6,
-  radiusMd: 10,
-  radiusLg: 16,
+  radiusMd: 8,
+  radiusLg: 12,
   fontSm: 11,
   fontMd: 13,
   shadowSm: '0 1px 3px rgba(0,0,0,0.04)',
@@ -149,8 +149,9 @@ const DS = {
 }
 
 const stanceColor = (s) => ({
-  bullish: '#34c759', bearish: '#ff3b30', neutral: '#aeaeb2', mixed: '#ff9f0a',
-}[s] || '#aeaeb2')
+  // A 股惯例：红=看多，绿=看空（与蜡烛图 candleUp/candleDown 及全局 design-system 一致）
+  bullish: '#e11d48', bearish: '#059669', neutral: '#71717a', mixed: '#d97706',
+}[s] || '#71717a')
 
 const stanceLabel = (s) => ({
   bullish: '看多', bearish: '看空', neutral: '中性', mixed: '混合',
@@ -511,7 +512,6 @@ function findNearestBarIdx(times, targetTime) {
 
 function onChartClick(e) {
   if (!e) return
-  console.log('[KLine] ECharts click', e.componentType, e.dataIndex, e.data?.postId)
   lastClickTime = Date.now()
 
   // Click on scatter marker → emit post click
@@ -582,14 +582,12 @@ let mouseDownInfo = null
 
 // Capture mousedown on wrapper — capture phase fires before zrender can intercept
 function onWrapperMouseDown(e) {
-  console.log('[KLine] mousedown captured on wrapper', e.target.tagName, e.clientX, e.clientY)
   mouseDownInfo = { clientX: e.clientX, clientY: e.clientY, time: Date.now() }
 }
 
 // Detect clicks via mouseup (bypasses dataZoom's click suppression on blank grid)
 function onDocMouseUp(e) {
   if (!mouseDownInfo) return
-  console.log('[KLine] mouseup — mousedown was recorded')
   const down = mouseDownInfo
   mouseDownInfo = null
 
@@ -602,24 +600,21 @@ function onDocMouseUp(e) {
   // Delay to let ECharts' own click handler fire first (sets lastClickTime for dedup)
   setTimeout(() => {
     if (Date.now() - lastClickTime < 200) {
-      console.log('[KLine] skipped — ECharts already handled this click')
       return
     }
     const chart = getChartInstance()
-    if (!chart) { console.log('[KLine] mouseup: getChartInstance() returned null'); return }
+    if (!chart) return
     const dom = chart.getDom()
-    if (!dom) { console.log('[KLine] mouseup: getDom() returned null'); return }
+    if (!dom) return
     const rect = dom.getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
     if (x < 0 || x > chart.getWidth() || y < 0 || y > chart.getHeight()) {
-      console.log('[KLine] mouseup: click outside chart area', { x, y, w: chart.getWidth(), h: chart.getHeight() })
       return
     }
     const bars = props.klineData.bars || []
     if (!bars.length) return
     const idx = resolveBarFromEvent({ offsetX: x }, bars.length, chart)
-    console.log('[KLine] mouseup click → x:', x, 'idx:', idx, 'bars:', bars.length)
     if (idx == null || idx < 0 || idx >= bars.length || !bars[idx]) return
     lastClickTime = Date.now()
     openPopup(idx, bars[idx], e.clientX, e.clientY)
@@ -629,7 +624,6 @@ function onDocMouseUp(e) {
 // Attach mouseup listener on mount (not dependent on option watch)
 onMounted(() => {
   document.addEventListener('mouseup', onDocMouseUp)
-  console.log('[KLine] mounted — mouseup listener attached')
 })
 
 onBeforeUnmount(() => {
@@ -726,7 +720,7 @@ onBeforeUnmount(() => {
 .kline-popup__title {
   font-size: 14px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: #18181b;
   letter-spacing: -0.01em;
 }
 
@@ -738,7 +732,7 @@ onBeforeUnmount(() => {
   justify-content: center;
   border: none;
   background: transparent;
-  color: #aeaeb2;
+  color: #71717a;
   font-size: 18px;
   cursor: pointer;
   border-radius: 8px;
@@ -747,7 +741,7 @@ onBeforeUnmount(() => {
 }
 .kline-popup__close:hover {
   background: rgba(0, 0, 0, 0.04);
-  color: #1d1d1f;
+  color: #18181b;
 }
 
 .kline-popup__ohlc {
@@ -760,20 +754,20 @@ onBeforeUnmount(() => {
 
 .kline-popup__ohlc td {
   padding: 5px 8px;
-  color: #6e6e73;
+  color: #52525b;
   text-align: left;
   font-size: 12px;
 }
 
 .kline-popup__ohlc td.num-up {
-  color: #ff3b30;
+  color: #e11d48;
   font-weight: 600;
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
 .kline-popup__ohlc td.num-down {
-  color: #34c759;
+  color: #059669;
   font-weight: 600;
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -790,7 +784,7 @@ onBeforeUnmount(() => {
   padding: 12px 18px 6px;
   font-size: 11px;
   font-weight: 600;
-  color: #6e6e73;
+  color: #52525b;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   position: sticky;
@@ -803,7 +797,7 @@ onBeforeUnmount(() => {
 .kline-popup__count {
   display: inline-block;
   background: rgba(0, 0, 0, 0.06);
-  color: #6e6e73;
+  color: #52525b;
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 9999px;
@@ -820,7 +814,7 @@ onBeforeUnmount(() => {
 
 .kline-popup__post {
   padding: 10px 14px;
-  border-left: 3px solid #aeaeb2;
+  border-left: 3px solid #d4d4d8;
   background: rgba(0, 0, 0, 0.02);
   border-radius: 0 10px 10px 0;
   transition: background 0.15s ease;
@@ -839,7 +833,7 @@ onBeforeUnmount(() => {
 .popup-post__name {
   font-size: 13px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: #18181b;
   letter-spacing: -0.01em;
 }
 
@@ -855,20 +849,20 @@ onBeforeUnmount(() => {
 .popup-post__title {
   display: inline-block;
   font-size: 12px;
-  color: #0071e3;
+  color: #2563eb;
   text-decoration: none;
   margin-bottom: 2px;
   line-height: 1.5;
   transition: color 0.12s;
 }
 .popup-post__title:hover {
-  color: #0060c7;
+  color: #1d4ed8;
   text-decoration: underline;
 }
 
 .popup-post__summary {
   font-size: 11px;
-  color: #6e6e73;
+  color: #52525b;
   line-height: 1.5;
 }
 
@@ -912,7 +906,7 @@ onBeforeUnmount(() => {
 .kline-popup__empty {
   padding: 28px;
   text-align: center;
-  color: #aeaeb2;
+  color: #71717a;
   font-size: 12px;
 }
 </style>

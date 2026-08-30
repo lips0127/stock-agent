@@ -202,7 +202,7 @@ async function onSave() {
       payload.interval_hours = Number(form.value.interval_hours)
     }
     const { data } = await updateSchedulerConfig(props.task.job_id, payload)
-    ElMessage.success(`已保存：下次执行 ${formatNext(data.next_run_time) || '—'}`)
+    ElMessage.success(`已保存：下次执行 ${formatNext(data.next_run_time) || '-'}`)
     emit('saved', { ...props.task, ...payload, next_run_time: data.next_run_time })
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '保存失败')
@@ -229,7 +229,7 @@ async function onToggle(val) {
 }
 
 function formatNext(s) {
-  if (!s) return '—'
+  if (!s) return '-'
   try {
     const d = new Date(s)
     if (isNaN(d.getTime())) return s
@@ -277,7 +277,7 @@ function statusTagType(s) {
 }
 
 function formatStarted(s) {
-  if (!s) return '—'
+  if (!s) return '-'
   const d = new Date(s)
   if (isNaN(d.getTime())) return s
   const pad = (n) => String(n).padStart(2, '0')
@@ -322,16 +322,16 @@ watch(() => props.task.enabled, () => {
 }
 .task-card__desc {
   font-size: 12px;
-  color: var(--text-tertiary, #6b7280);
+  color: var(--color-text-tertiary);
   margin: 6px 0;
   line-height: 1.5;
 }
 .task-card__func {
   display: inline-block;
-  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--text-secondary, #4b5563);
-  background: var(--bg-elevated, #f3f4f6);
+  color: var(--color-text-secondary);
+  background: var(--color-bg-muted);
   padding: 2px 8px;
   border-radius: 4px;
   margin-bottom: 14px;
@@ -352,7 +352,7 @@ watch(() => props.task.enabled, () => {
 }
 .form-row label {
   font-size: 12px;
-  color: var(--text-secondary, #4b5563);
+  color: var(--color-text-secondary);
   min-width: 38px;
 }
 .task-card__footer {
@@ -361,14 +361,14 @@ watch(() => props.task.enabled, () => {
   align-items: center;
   margin-top: 14px;
   padding-top: 12px;
-  border-top: 1px solid var(--border-soft, #e5e7eb);
+  border-top: 1px solid var(--color-border);
 }
 .task-card__hint {
   font-size: 11px;
-  color: var(--text-tertiary, #9ca3af);
+  color: var(--color-text-tertiary);
 }
 .task-card__hint strong {
-  color: var(--color-bull, #16a34a);
+  color: var(--color-success);
 }
 .task-card__next {
   margin-top: 10px;
@@ -378,10 +378,10 @@ watch(() => props.task.enabled, () => {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: var(--text-secondary, #4b5563);
+  color: var(--color-text-secondary);
 }
 .next-run--paused {
-  color: var(--text-tertiary, #9ca3af);
+  color: var(--color-text-tertiary);
 }
 
 /* ── 运行历史手风琴 ── */
@@ -391,36 +391,36 @@ watch(() => props.task.enabled, () => {
   gap: 6px;
   margin-top: 12px;
   padding-top: 10px;
-  border-top: 1px dashed var(--border-soft, #e5e7eb);
+  border-top: 1px dashed var(--color-border);
   cursor: pointer;
   font-size: 12px;
   user-select: none;
   transition: color 0.15s;
 }
-.task-card__history:hover { color: var(--color-accent, #4f46e5); }
+.task-card__history:hover { color: var(--color-accent); }
 .history-icon { font-size: 12px; opacity: 0.7; }
 .history-label {
   font-weight: 500;
-  color: var(--text-secondary, #4b5563);
+  color: var(--color-text-secondary);
 }
 .history-summary {
   margin-left: auto;
   font-size: 11px;
   padding: 1px 8px;
   border-radius: 10px;
-  background: var(--bg-elevated, #f3f4f6);
-  color: var(--text-tertiary, #9ca3af);
+  background: var(--color-bg-muted);
+  color: var(--color-text-tertiary);
 }
-.history-summary--success { color: #16a34a; }
-.history-summary--failed { color: #dc2626; }
-.history-summary--running { color: #d97706; }
-.history-summary--skipped { color: #6b7280; }
-.history-summary--empty { font-style: italic; }
+.history-summary--success { color: var(--color-success); }
+.history-summary--failed { color: var(--color-danger); }
+.history-summary--running { color: var(--color-warning); }
+.history-summary--skipped { color: var(--color-text-tertiary); }
+.history-summary--empty { color: var(--color-text-disabled); }
 
 .task-card__history-panel {
   margin-top: 8px;
   padding: 10px 12px;
-  background: var(--bg-muted, #fafafa);
+  background: var(--color-bg-page);
   border-radius: 6px;
   max-height: 240px;
   overflow-y: auto;
@@ -428,7 +428,7 @@ watch(() => props.task.enabled, () => {
 .history-loading,
 .history-empty {
   font-size: 12px;
-  color: var(--text-tertiary, #9ca3af);
+  color: var(--color-text-tertiary);
   padding: 8px 0;
   text-align: center;
 }
@@ -443,33 +443,33 @@ watch(() => props.task.enabled, () => {
 .history-item {
   padding: 6px 8px;
   border-radius: 4px;
-  background: #fff;
-  border-left: 3px solid var(--border-soft, #e5e7eb);
+  background: var(--color-bg-elevated);
+  border-left: 3px solid var(--color-border);
   font-size: 12px;
 }
-.history-item--success { border-left-color: #16a34a; }
-.history-item--failed { border-left-color: #dc2626; }
-.history-item--running { border-left-color: #d97706; }
-.history-item--skipped { border-left-color: #9ca3af; }
+.history-item--success { border-left-color: var(--color-success); }
+.history-item--failed { border-left-color: var(--color-danger); }
+.history-item--running { border-left-color: var(--color-warning); }
+.history-item--skipped { border-left-color: var(--color-text-disabled); }
 .history-item__head {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 .history-item__time {
-  color: var(--text-secondary, #4b5563);
-  font-family: 'JetBrains Mono', Consolas, monospace;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
   font-size: 11px;
 }
 .history-item__dur {
-  color: var(--text-tertiary, #9ca3af);
+  color: var(--color-text-tertiary);
   font-size: 11px;
   margin-left: auto;
 }
 .history-item__msg {
   margin-top: 4px;
   font-size: 11px;
-  color: var(--text-tertiary, #9ca3af);
+  color: var(--color-text-tertiary);
   line-height: 1.4;
   word-break: break-all;
 }

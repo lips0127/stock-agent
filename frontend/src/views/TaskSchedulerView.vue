@@ -88,24 +88,24 @@ onMounted(load)
 .task-page__loading {
   padding: 60px 0;
   text-align: center;
-  color: var(--text-tertiary, #6b7280);
+  color: var(--color-text-tertiary);
 }
 .task-page__empty {
   padding: 40px 0;
   text-align: center;
-  color: var(--text-tertiary, #6b7280);
-  font-size: 13px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
 }
 .task-page__stats {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-  margin-bottom: 18px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
 }
 .task-page__grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  gap: 14px;
+  gap: var(--space-4);
 }
 @media (max-width: 768px) {
   .task-page__stats { grid-template-columns: 1fr; }

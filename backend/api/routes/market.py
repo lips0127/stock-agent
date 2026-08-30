@@ -1,9 +1,10 @@
 from flask import Blueprint, request, jsonify
-from datetime import date
+from datetime import datetime, date
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 
 from backend.core.database import get_connection
-from backend.api.middleware import rate_limit
+from backend.api.middleware import login_required, rate_limit
 from backend.services.stock_service import get_sina_index_spot
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ INDEX_SYMBOLS = {
 
 
 @market_bp.route("/api/indices", methods=["GET"])
+@login_required
 def get_indices():
     """从 DB 获取最后一次扫描时的大盘指数（可能滞后）。"""
     with get_connection() as conn:
@@ -41,26 +43,60 @@ def get_indices():
 
 
 @market_bp.route("/api/indices/live", methods=["GET"])
+@login_required
 def get_indices_live():
-    """实时从新浪获取大盘指数。"""
-    results = []
-    for symbol, expected_name in INDEX_SYMBOLS.items():
-        try:
-            data = get_sina_index_spot(symbol)
-            if data:
-                results.append({
-                    "symbol": symbol.replace("s_", ""),
-                    "name": data["name"],
-                    "value": data["current"],
-                    "change_amount": data["change_amount"],
-                    "change_pct": data["change_pct"],
-                })
-        except Exception as e:
-            logger.warning(f"获取实时指数 {symbol} 失败: {e}", exc_info=True)
-    return jsonify(results)
+    """实时从新浪并行获取大盘指数，附带数据可信元数据。
+
+    按 SPEC §3.1/3.3：响应必须可回答 source / as-of / coverage / degraded /
+    error；部分指数失败时仍返回可用子集并显式标注 degraded，不得把部分
+    失败伪装成完整实时快照。串行 5×5s 会逼近网关超时，改为并行拉取。
+    """
+    fetched_at = datetime.now().isoformat(timespec="seconds")
+    symbol_order = {symbol: i for i, symbol in enumerate(INDEX_SYMBOLS)}
+
+    def _fetch(symbol: str):
+        return symbol, get_sina_index_spot(symbol)
+
+    results, errors = [], []
+    with ThreadPoolExecutor(max_workers=len(INDEX_SYMBOLS)) as pool:
+        futures = {pool.submit(_fetch, s): s for s in INDEX_SYMBOLS}
+        for fut in as_completed(futures):
+            symbol = futures[fut]
+            try:
+                _, data = fut.result()
+                if data:
+                    results.append({
+                        "symbol": symbol.replace("s_", ""),
+                        "name": data["name"],
+                        "value": data["current"],
+                        "change_amount": data["change_amount"],
+                        "change_pct": data["change_pct"],
+                    })
+                else:
+                    errors.append({"symbol": symbol, "error": "empty response"})
+            except Exception as e:
+                # 只回显异常类型，不透出内部错误串
+                errors.append({"symbol": symbol, "error": type(e).__name__})
+                logger.warning(f"获取实时指数 {symbol} 失败: {e}", exc_info=True)
+
+    results.sort(key=lambda item: symbol_order.get("s_" + item["symbol"], 99))
+
+    total = len(INDEX_SYMBOLS)
+    ok = len(results)
+    return jsonify({
+        "data": results,
+        "source": "sina",
+        "as_of": fetched_at,
+        "freshness": "realtime" if ok else "unavailable",
+        "coverage": {"expected": total, "ok": ok, "failed": total - ok},
+        "degraded": 0 < ok < total,
+        "unavailable": ok == 0,
+        "errors": errors,
+    })
 
 
 @market_bp.route("/api/top_stocks", methods=["GET"])
+@login_required
 @rate_limit
 def get_top_stocks():
     """获取高股息股票 TOP N（优先取全市场扫描结果）。"""
@@ -95,22 +131,42 @@ def get_top_stocks():
 
 
 @market_bp.route("/api/all_stocks", methods=["GET"])
+@login_required
 @rate_limit
 def get_all_stocks():
-    """获取最新扫描日期的全部股票，带分页。
+    """获取最新扫描日期的全部股票，带分页与服务端过滤。
 
     可选 `scan_type`（'index' / 'full'）：指定时按该扫描类型取其**自身最近一次**
     扫描日期的数据（红利指数页用 'index'，避免被当日全市场扫描掩盖）；
     不指定时沿用旧逻辑——优先全市场（full），无则回退全部。
+
+    可选 `q`：按代码/名称子串过滤（服务端全量过滤，避免只搜当前页的假结果）；
+    可选 `min_yield`：股息率下限过滤。
     """
     page = request.args.get("page", 1, type=int)
     page_size = request.args.get("page_size", 100, type=int)
     scan_type = request.args.get("scan_type", type=str)
+    q = (request.args.get("q", type=str) or "").strip()
+    min_yield = request.args.get("min_yield", type=float)
     if page < 1:
         page = 1
     if page_size < 1 or page_size > 500:
         page_size = 100
     offset = (page - 1) * page_size
+
+    search_sql = ""
+    search_params: tuple = ()
+    if q:
+        like = f"%{q}%"
+        search_sql = "AND (code LIKE ? OR name LIKE ?)"
+        search_params = (like, like)
+    yield_sql = ""
+    yield_params: tuple = ()
+    if min_yield is not None:
+        yield_sql = "AND dividend_yield >= ?"
+        yield_params = (min_yield,)
+    filter_sql = search_sql + yield_sql
+    filter_params = search_params + yield_params
 
     with get_connection() as conn:
         cur = conn.cursor()
@@ -140,17 +196,17 @@ def get_all_stocks():
 
         # 总数
         cur.execute(
-            f"SELECT COUNT(*) FROM stock_daily_metrics WHERE date = ? {scan_filter} {_EXCLUDE_RISK_SQL}",
-            (latest_date, *scan_params),
+            f"SELECT COUNT(*) FROM stock_daily_metrics WHERE date = ? {scan_filter} {filter_sql} {_EXCLUDE_RISK_SQL}",
+            (latest_date, *scan_params, *filter_params),
         )
         total = cur.fetchone()[0]
 
         # 分页数据
         cur.execute(
             f"""SELECT * FROM stock_daily_metrics
-               WHERE date = ? {scan_filter} {_EXCLUDE_RISK_SQL} ORDER BY dividend_yield DESC
+               WHERE date = ? {scan_filter} {filter_sql} {_EXCLUDE_RISK_SQL} ORDER BY dividend_yield DESC
                LIMIT ? OFFSET ?""",
-            (latest_date, *scan_params, page_size, offset),
+            (latest_date, *scan_params, *filter_params, page_size, offset),
         )
         columns = [desc[0] for desc in cur.description]
         stocks = [dict(zip(columns, row)) for row in cur.fetchall()]

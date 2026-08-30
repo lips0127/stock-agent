@@ -41,6 +41,7 @@ from backend.core.database import (
     upsert_vix_history, get_vix_latest, get_vix_history,
     compute_vix_percentile as db_compute_percentile,
     get_vix_history_for_zscore,
+    get_vix_latest_before,
 )
 from backend.data.vix_sources import (
     fetch_50etf_qvix, fetch_multi_etf_qvix, fetch_index_daily,
@@ -268,6 +269,113 @@ def compute_fear_greed(components: dict) -> float:
 
 
 # ─────────────────────────────────────────────────────────────────
+# v8 大盘/小盘分离轨道：纯 cap 信号 FG（废弃 composite 合成）
+# ─────────────────────────────────────────────────────────────────
+
+# 单条轨道的 FG 只用该 cap 能区分的情绪信号：IV 水平(Z) + IV 变化率 +
+# IV 跨标的振幅 + RV 变化。PCR/融资/涨跌停是全市场信号，无法区分大小盘，
+# 降级为参考展示（仍计算并存库，但不再进 FG）。现货位置分单独展示，不进 FG。
+_TRACK_WEIGHTS = {
+    "vix":       0.45,
+    "vix_chg":   0.15,
+    "vix_swing": 0.10,
+    "rv_chg":    0.30,
+}
+
+
+def compute_track_fg(track: str, c: dict) -> Optional[float]:
+    """单条轨道（large/small）的恐惧贪婪分：纯 cap 信号加权。
+
+    c 为该轨道的分量 dict，需含 vix/vix_score/vix_change_pct/vix_change_score/
+    vix_swing_pct/vix_swing_score/rv_blended/rv_change_score/rv_prev。
+    缺失分量按比例分摊到可用分量；IV 主体缺失则返回 None（轨道不可用）。
+    """
+    vix = c.get("vix")
+    if vix is None:
+        return None
+    vix_ok = vix is not None
+    scores = {
+        "vix":       c.get("vix_score", 50.0),
+        "vix_chg":   c.get("vix_change_score", 50.0),
+        "vix_swing": c.get("vix_swing_score", 50.0),
+        "rv_chg":    c.get("rv_change_score", 50.0),
+    }
+    available = {
+        "vix":       vix_ok,
+        "vix_chg":   vix_ok and c.get("vix_change_pct") is not None,
+        "vix_swing": vix_ok and c.get("vix_swing_pct") is not None,
+        "rv_chg":    c.get("rv") is not None,
+    }
+    active_weight = sum(_TRACK_WEIGHTS[k] for k, ok in available.items() if ok)
+    if active_weight <= 0:
+        return None
+    norm = {k: _TRACK_WEIGHTS[k] / active_weight for k, ok in available.items() if ok}
+    c["fg_scores"] = {k: round(v, 2) for k, v in scores.items()}
+    c["fg_available_weights"] = {k: round(v, 4) for k, v in norm.items()}
+    return round(sum(scores[k] * norm[k] for k in norm), 1)
+
+
+def compute_track_zscore(track: str, current_vix: float,
+                         date_str: Optional[str] = None) -> Optional[float]:
+    """单条轨道 VIX 的滚动 Z-Score，point-in-time。
+
+    date_str 给定（回填）→ 取 date < date_str 的近 252 行该轨道 VIX；
+    date_str=None（实时今日）→ 取 DB 最近 252 行。两种口径都不含当日，
+    即「当日 VIX 相对自身历史的标准化」。
+    """
+    from backend.core.database import get_vix_column_before, get_vix_history_for_zscore
+    col = "large_vix" if track == "large" else "small_vix"
+    if date_str:
+        history = get_vix_column_before(date_str, col, 252)
+    else:
+        # 实时：取近 252 行该列（get_vix_history_for_zscore 只读 vix 列，这里手写）
+        from backend.core.database import get_connection
+        with get_connection() as conn:
+            history = [r[0] for r in conn.execute(
+                f"SELECT {col} FROM vix_history "
+                f"WHERE {col} IS NOT NULL ORDER BY date DESC LIMIT 252"
+            ).fetchall() if r[0] is not None]
+    if len(history) < 20:
+        return None
+    mu = float(np.mean(history))
+    sigma = float(np.std(history))
+    if sigma < 0.5:
+        return None
+    return round((current_vix - mu) / sigma, 3)
+
+
+def _track_change_pct(curr, prev, prev2) -> Optional[float]:
+    """2 日平滑 VIX 变化率%（curr/prev/prev2 为该轨道连续三日的合成 VIX）。"""
+    raw = (curr - prev) / prev * 100 if (curr and prev and prev > 0) else None
+    prv = (prev - prev2) / prev2 * 100 if (prev and prev2 and prev2 > 0) else None
+    if raw is not None and prv is not None:
+        return round((raw + prv) / 2, 2)
+    return round(raw, 2) if raw is not None else None
+
+
+def _track_percentile(track: str, fg: Optional[float],
+                      date_str: Optional[str] = None) -> Optional[float]:
+    """单条轨道 FG 的滚动百分位，point-in-time（回填用 date < date_str）。"""
+    if fg is None:
+        return None
+    from backend.core.database import get_vix_column_before, get_connection
+    col = "large_fg" if track == "large" else "small_fg"
+    if date_str:
+        history = get_vix_column_before(date_str, col, 252)
+    else:
+        with get_connection() as conn:
+            history = [r[0] for r in conn.execute(
+                f"SELECT {col} FROM vix_history "
+                f"WHERE {col} IS NOT NULL ORDER BY date DESC LIMIT 252"
+            ).fetchall() if r[0] is not None]
+    if len(history) < 5:
+        return 50.0
+    # 样本 5-19：用累积百分位（样本虽小但仍有方向意义，避免恒 50 抹平早期曲线）
+    below = sum(1 for v in history if v <= fg)
+    return round(below / len(history) * 100, 1)
+
+
+# ─────────────────────────────────────────────────────────────────
 # 阈值与 regime（v5 改为基于滚动百分位）
 # ─────────────────────────────────────────────────────────────────
 
@@ -439,6 +547,21 @@ class VixSnapshot:
     spot_mom_5d: Optional[float] = None
     spot_mom_20d: Optional[float] = None
     spot_new_high_ratio: Optional[float] = None
+    # v8 大小盘分离轨道
+    large_vix: Optional[float] = None
+    large_zscore: Optional[float] = None
+    large_fg: Optional[float] = None
+    large_percentile: Optional[float] = None
+    large_regime: Optional[str] = None
+    large_rv: Optional[float] = None
+    large_spot_score: Optional[float] = None
+    small_vix: Optional[float] = None
+    small_zscore: Optional[float] = None
+    small_fg: Optional[float] = None
+    small_percentile: Optional[float] = None
+    small_regime: Optional[str] = None
+    small_rv: Optional[float] = None
+    small_spot_score: Optional[float] = None
     # 内部状态
     components: dict = None
 
@@ -482,6 +605,20 @@ class VixSnapshot:
             "spot_mom_5d": self.spot_mom_5d,
             "spot_mom_20d": self.spot_mom_20d,
             "spot_new_high_ratio": self.spot_new_high_ratio,
+            "large_vix": self.large_vix,
+            "large_zscore": self.large_zscore,
+            "large_fg": self.large_fg,
+            "large_percentile": self.large_percentile,
+            "large_regime": self.large_regime,
+            "large_rv": self.large_rv,
+            "large_spot_score": self.large_spot_score,
+            "small_vix": self.small_vix,
+            "small_zscore": self.small_zscore,
+            "small_fg": self.small_fg,
+            "small_percentile": self.small_percentile,
+            "small_regime": self.small_regime,
+            "small_rv": self.small_rv,
+            "small_spot_score": self.small_spot_score,
         }
 
 
@@ -498,52 +635,83 @@ def _compute_composite_percentile(composite: Optional[float], days: int = 252) -
 
 
 def recompute_percentiles(window: int = 252) -> dict:
-    """全表重算 composite_percentile + composite_regime（纯 DB，不拉外部数据）。
+    """全表重算 large/small 轨道与恐慌贪婪指数（fg7）的 percentile + regime（纯 DB，point-in-time）。
 
-    回填是 oldest→newest，早期行算百分位时历史里仍混着尚未覆盖的旧数据，
-    且 v6 后 composite 分布整体下移，必须在全部数据就位后统一按
-    「该行自身日期往前 window 个交易日」的 point-in-time 口径重算一遍。
-
+    v8：废弃 composite。两条轨道各自基于自身 FG 的 trailing window 百分位。
+    2026-08-30：新增恐慌贪婪指数 fg7（fear_greed_v7）的 trailing window 百分位，
+    regime 用 classify_by_percentile 划分，供 /vix 页面单一主指标展示。
+    口径：每行取「该行及之前 window 个交易日」的历史，不含未来。
     返回 {"updated": N}。
     """
     from backend.core.database import get_connection
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT date, composite_score FROM vix_history "
-            "WHERE composite_score IS NOT NULL ORDER BY date ASC"
+            "SELECT date, large_fg, small_fg, fear_greed_v7 FROM vix_history "
+            "ORDER BY date ASC"
         ).fetchall()
-        scores = [(r[0], float(r[1])) for r in rows]
+        records = [(r[0], r[1], r[2], r[3]) for r in rows]
         updated = 0
-        for i, (d, score) in enumerate(scores):
-            # 取该行及之前 window 个交易日的 composite 历史（point-in-time）
+        for i, (d, large_fg, small_fg, fg7) in enumerate(records):
             start = max(0, i + 1 - window)
-            hist = [s for _, s in scores[start:i + 1]]
-            if len(hist) < 20:
-                pct = 50.0
-            else:
-                below = sum(1 for v in hist if v <= score)
-                pct = round(below / len(hist) * 100, 1)
-            regime = classify_by_percentile(pct)
+            hist_large = [v for _, v, _, _ in records[start:i + 1]
+                          if v is not None]
+            hist_small = [v for _, _, v, _ in records[start:i + 1]
+                          if v is not None]
+            hist_fg7 = [v for _, _, _, v in records[start:i + 1]
+                        if v is not None]
+
+            def _pct(hist, val):
+                if val is None or len(hist) < 5:
+                    return 50.0
+                return round(sum(1 for v in hist if v <= val) / len(hist) * 100, 1)
+
+            large_pct = _pct(hist_large, large_fg)
+            small_pct = _pct(hist_small, small_fg)
+            conn.execute(
+                "UPDATE vix_history SET large_percentile = ?, large_regime = ?, "
+                "small_percentile = ?, small_regime = ? WHERE date = ?",
+                (large_pct, classify_by_percentile(large_pct),
+                 small_pct, classify_by_percentile(small_pct), d),
+            )
+            if fg7 is not None:
+                fg7_pct = _pct(hist_fg7, fg7)
+                conn.execute(
+                    "UPDATE vix_history SET fg7_percentile = ?, fg7_regime = ? "
+                    "WHERE date = ?",
+                    (fg7_pct, classify_by_percentile(fg7_pct), d),
+                )
+            # 兼容旧字段：composite_* 跟随大盘轨道，避免旧前端/仪表盘读到 NULL
             conn.execute(
                 "UPDATE vix_history SET composite_percentile = ?, composite_regime = ? "
                 "WHERE date = ?",
-                (pct, regime, d),
+                (large_pct, classify_by_percentile(large_pct), d),
             )
             updated += 1
         conn.commit()
-    logger.info(f"recompute_percentiles: 重算 {updated} 行")
+    logger.info(f"recompute_percentiles: 重算 {updated} 行（large/small 双轨道 + fg7）")
     return {"updated": updated}
 
 
 def compute_today_snapshot(date_str: Optional[str] = None,
                            require_multi: bool = False,
-                           truth_series: Optional[pd.DataFrame] = None) -> Optional[VixSnapshot]:
-    """计算并返回某日 VIX 快照（v6.1）。
+                           truth_series: Optional[pd.DataFrame] = None,
+                           progress=None) -> Optional[VixSnapshot]:
+    """计算并返回某日 VIX 快照（v8 大小盘分离版，2026-07-01）。
 
-    require_multi=True（回填用）：若 5 ETF 合成失败（只能拿到单 50ETF 或全缺），
-    返回 None，让调用方跳过写库、保留旧值，避免降级值污染历史曲线。
-    require_multi=False（实时用）：允许降级到单 50ETF，保证当日总有值可展示。
-    truth_series: 回填时可传入 build_truth_series() 的结果复用，避免逐日重拉长历史。
+    v8 重构：
+      * 废弃 composite = 0.6·FG + 0.4·spot 合成。改为两条独立轨道：
+        - 大盘轨道：50ETF + 300ETF QVIX + 沪深300 RV + 沪深300 现货
+        - 小盘轨道：500ETF + 创业板 + 科创50 QVIX + 中证1000 RV + 中证1000 现货
+      * 每条轨道各自 VIX / Z-Score / FG(纯 cap 信号) / percentile / regime。
+      * PCR / 融资融券 / 涨跌停 是全市场信号，无法区分大小盘，降级为参考展示，
+        不再进入 FG。
+      * 现货位置分单独展示（large_spot_score / small_spot_score），不再参与 FG。
+      * 全程 point-in-time：回填历史日 d 时所有数据源用 as_of=d 截断，
+        Z-Score / 百分位用 date < d 的历史（修复 v6.1 的未来因子泄漏）。
+
+    require_multi=True（回填用）：5 ETF 合成失败则返回 None，保留旧值不写降级。
+    require_multi=False（实时用）：允许降级到单 50ETF。
+    truth_series: 回填时可传入 build_truth_series() 的结果复用。
     """
     if not date_str:
         date_str = datetime.now().strftime("%Y-%m-%d")
@@ -557,13 +725,12 @@ def compute_today_snapshot(date_str: Optional[str] = None,
 
     components: dict = {}
     components["_target_date"] = date_str
-    components["_version"] = "v6.1"
+    components["_version"] = "v8"
 
-    # ── 1) 多 ETF QVIX → 合成 VIX（v6.1 代表性加权 + 宽基/成长拆分）──
+    # ── 1) 多 ETF QVIX → 合成 VIX + 大小盘轨道 ──
+    if progress:
+        progress("拉取多 ETF QVIX 期权隐含波动率")
     multi_qvix = fetch_multi_etf_qvix(days=days_lookback, as_of=date_str)
-    synth_prev = None
-    synth_prev2 = None
-    swing_pct = None
     if multi_qvix:
         components["iv_50etf"] = multi_qvix.get("50etf")
         components["iv_300etf"] = multi_qvix.get("300etf")
@@ -574,114 +741,118 @@ def compute_today_snapshot(date_str: Optional[str] = None,
         synth_prev = multi_qvix.get("synthetic_prev")
         synth_prev2 = multi_qvix.get("synthetic_prev2")
         swing_pct = multi_qvix.get("swing_pct")
-        components["vix_broad"] = multi_qvix.get("broad")
-        components["vix_growth"] = multi_qvix.get("growth")
-        components["vix_growth_premium"] = multi_qvix.get("growth_premium")
         vix_source = "multi_etf"
         etf_count = multi_qvix["count"]
     else:
-        # 5 ETF 合成失败。回填模式下宁可跳过也不写降级值（避免污染历史曲线）。
         if require_multi:
             logger.info(f"VIX {date_str}: 多 ETF 合成失败，require_multi 跳过（保留旧值）")
             return None
-        # 实时模式：回退到单 50ETF QVIX，保证当日有值
         qvix_df = fetch_50etf_qvix(days=days_lookback)
         if qvix_df is not None and not qvix_df.empty:
             synthetic_vix = float(qvix_df["iv_close"].iloc[-1])
             components["iv_50etf"] = synthetic_vix
-            if len(qvix_df) >= 2:
-                synth_prev = float(qvix_df["iv_close"].iloc[-2])
+            synth_prev = float(qvix_df["iv_close"].iloc[-2]) if len(qvix_df) >= 2 else None
+            synth_prev2 = float(qvix_df["iv_close"].iloc[-3]) if len(qvix_df) >= 3 else None
+            swing_pct = None
             vix_source = "50etf_only"
             etf_count = 1
         else:
             synthetic_vix = None
+            synth_prev = synth_prev2 = swing_pct = None
             vix_source = "none"
             etf_count = 0
     components["vix"] = synthetic_vix
     components["vix_source"] = vix_source
     components["vix_etf_count"] = etf_count
 
-    # ── 2) Z-Score ──
-    if synthetic_vix is not None:
-        zscore = compute_vix_zscore(synthetic_vix)
-    else:
-        zscore = None
-    components["vix_zscore"] = zscore
+    # ── 2) 大盘 / 小盘轨道构建 ──
+    if progress:
+        progress("构建大小盘轨道（RV / 现货位置）")
 
-    # ── 3) VIX → 0-100 分（水平 + 平滑变化率 + 波动冲击）──
-    vix_score = _vix_to_score(synthetic_vix, zscore)
-    components["vix_score"] = vix_score
+    def _build_track(track: str, vix, vix_prev, vix_prev2, swing,
+                     rv_symbol: str, spot_symbol: str) -> dict:
+        """构建单条轨道的分量 dict。"""
+        c: dict = {"vix": vix}
+        if vix is None:
+            c["vix_score"] = 50.0
+            c["zscore"] = None
+        else:
+            c["zscore"] = compute_track_zscore(track, vix, date_str)
+            c["vix_score"] = _vix_to_score(vix, c["zscore"])
+        c["vix_change_pct"] = _track_change_pct(vix, vix_prev, vix_prev2)
+        c["vix_change_score"] = _vix_change_to_score(c["vix_change_pct"])
+        c["vix_swing_pct"] = swing
+        c["vix_swing_score"] = _vix_swing_to_score(swing)
 
-    # v6.1: VIX 日变化率（2 日平滑：当日环比与上一日环比取均值，过滤单日噪声）
-    # 全部从 QVIX 序列内派生，回填顺序无关（不依赖 DB 中可能未就位的行）。
-    raw_change_pct = None
-    if synthetic_vix is not None and synth_prev is not None and synth_prev > 0:
-        raw_change_pct = (synthetic_vix - synth_prev) / synth_prev * 100
-    prev_change = None
-    if synth_prev is not None and synth_prev2 is not None and synth_prev2 > 0:
-        prev_change = (synth_prev - synth_prev2) / synth_prev2 * 100
-    if raw_change_pct is not None and prev_change is not None:
-        vix_change_pct = round((raw_change_pct + prev_change) / 2, 2)
-    elif raw_change_pct is not None:
-        vix_change_pct = round(raw_change_pct, 2)
-    else:
-        vix_change_pct = None
-    components["vix_change_pct_raw"] = round(raw_change_pct, 2) if raw_change_pct is not None else None
-    components["vix_change_pct"] = vix_change_pct
-    components["vix_change_score"] = _vix_change_to_score(vix_change_pct)
+        # RV（as_of 截断，PIT）
+        rv_df = fetch_index_daily(rv_symbol, days=90, as_of=date_str)
+        rv_now = garman_klass_rv(rv_df, window=30) if rv_df is not None else None
+        rv_prev = garman_klass_rv(rv_df, window=60) if rv_df is not None else None
+        c["rv"] = rv_now
+        c["rv_change_score"] = _rv_change_to_score(rv_now, rv_prev)
 
-    # v6.1: 跨 ETF 波动冲击强度（vix_sources 已做单 ETF 标准化后加权）
-    components["vix_swing_pct"] = swing_pct
-    components["vix_swing_score"] = _vix_swing_to_score(swing_pct)
+        # 现货位置（as_of 截断，PIT；单独展示不进 FG）
+        spot = get_spot_signals_for_date(date_str, days=400, symbol=spot_symbol)
+        c["spot"] = spot
+        c["spot_score"] = _spot_to_score(spot)
+        return c
 
-    # ── 4) 已实现波动率 ──
-    hs300_df = fetch_index_daily(HS300_SYMBOL, days=90)
-    zz1000_df = fetch_index_daily(ZZ1000_SYMBOL, days=90)
-    rv_hs300 = garman_klass_rv(hs300_df, window=30) if hs300_df is not None else None
-    rv_zz1000 = garman_klass_rv(zz1000_df, window=30) if zz1000_df is not None else None
-    rv_blended = blended_rv(rv_hs300, rv_zz1000)
-    rv_hs300_prev = garman_klass_rv(hs300_df, window=60) if hs300_df is not None else None
-    rv_change_score = _rv_change_to_score(rv_blended, rv_hs300_prev)
-    components["rv_change_score"] = rv_change_score
-    components["rv_hs300"] = rv_hs300
-    components["rv_zz1000"] = rv_zz1000
-    components["rv_blended"] = rv_blended
+    large_c = _build_track("large",
+                           multi_qvix.get("large") if multi_qvix else synthetic_vix,
+                           multi_qvix.get("large_prev") if multi_qvix else synth_prev,
+                           multi_qvix.get("large_prev2") if multi_qvix else synth_prev2,
+                           multi_qvix.get("large_swing") if multi_qvix else swing_pct,
+                           HS300_SYMBOL, HS300_SYMBOL)
+    small_c = _build_track("small",
+                           multi_qvix.get("small") if multi_qvix else None,
+                           multi_qvix.get("small_prev") if multi_qvix else None,
+                           multi_qvix.get("small_prev2") if multi_qvix else None,
+                           multi_qvix.get("small_swing") if multi_qvix else None,
+                           ZZ1000_SYMBOL, ZZ1000_SYMBOL)
+    components["large"] = large_c
+    components["small"] = small_c
 
-    # ── 5) PCR（v5 真实数据） ──
+    large_fg = compute_track_fg("large", large_c)
+    small_fg = compute_track_fg("small", small_c)
+    large_c["fg"] = large_fg
+    small_c["fg"] = small_fg
+
+    # 百分位（PIT）+ regime
+    large_pct = _track_percentile("large", large_fg, date_str)
+    small_pct = _track_percentile("small", small_fg, date_str)
+    large_c["percentile"] = large_pct
+    small_c["percentile"] = small_pct
+    large_c["regime"] = classify_by_percentile(large_pct)
+    small_c["regime"] = classify_by_percentile(small_pct)
+
+    # ── 3) 全市场参考信号（PCR / 融资融券 / 涨跌停）—— 仅展示，不进 FG ──
+    if progress:
+        progress("拉取全市场参考信号（PCR / 融资 / 涨跌停）")
     pcr_data = fetch_pcr(date_str)
     if pcr_data:
         components["pcr_volume"] = pcr_data["pcr_volume"]
         components["pcr_oi"] = pcr_data["pcr_oi"]
         components["pcr_call_volume"] = pcr_data["call_volume"]
         components["pcr_put_volume"] = pcr_data["put_volume"]
-        components["pcr_call_oi"] = pcr_data["call_oi"]
-        components["pcr_put_oi"] = pcr_data["put_oi"]
         components["pcr_source"] = "sse"
     else:
-        components["pcr_volume"] = None
-        components["pcr_oi"] = None
+        components["pcr_volume"] = components["pcr_oi"] = None
         components["pcr_source"] = "unavailable"
-    pcr_score = _pcr_to_score(
-        components.get("pcr_volume"),
-        components.get("pcr_oi"),
-    )
-    components["pcr_score"] = pcr_score
+    components["pcr_score"] = _pcr_to_score(
+        components.get("pcr_volume"), components.get("pcr_oi"))
 
-    # ── 6) 融资融券 ──
-    margin = fetch_margin_balance()
+    margin = fetch_margin_balance(as_of=date_str)
     if margin:
         components["margin_balance"] = margin["margin_balance"]
         components["margin_source"] = "real"
     else:
         components["margin_balance"] = None
         components["margin_source"] = "unavailable"
-    prev = get_vix_latest()
-    prev_margin = prev.get("margin_balance") if prev else None
+    prev_row = get_vix_latest_before(date_str) if date_str else get_vix_latest()
+    prev_margin = prev_row.get("margin_balance") if prev_row else None
     components["margin_change_score"] = _margin_change_to_score(
-        prev_margin, components.get("margin_balance")
-    )
+        prev_margin, components.get("margin_balance"))
 
-    # ── 7) 涨跌停 ──
     limits = fetch_limit_counts(date_str)
     if limits:
         components["limit_up_count"] = limits["limit_up_count"]
@@ -691,15 +862,12 @@ def compute_today_snapshot(date_str: Optional[str] = None,
         components["limit_up_count"] = 0
         components["limit_down_count"] = 0
         components["limit_source"] = "unavailable"
-    limit_score = _limit_ratio_to_score(
-        components.get("limit_up_count"),
-        components.get("limit_down_count"),
-    )
-    components["limit_score"] = limit_score
+    components["limit_score"] = _limit_ratio_to_score(
+        components.get("limit_up_count"), components.get("limit_down_count"))
 
-    # ── 7.5) v7.0 construct-truth 恐惧贪婪（与真相同公式，v6.1 并存）──
-    # 价格回撤锚 + 体制门控 + IV 飙升 + 广度崩塌 + IV 水平门控。
-    # 用 live 涨跌停真实家数；缺失时广度分量降权。失败不阻断 v6.1 流程。
+    # ── 4) v7.0 construct-truth 恐惧分（与真相同公式，并存对照）──
+    if progress:
+        progress("计算 v7 构造真实情绪分")
     try:
         ld_count = components.get("limit_down_count")
         ld_arg = float(ld_count) if (components.get("limit_source") == "real" and ld_count is not None) else None
@@ -716,40 +884,14 @@ def compute_today_snapshot(date_str: Optional[str] = None,
         components["comp_iv_level_v7"] = truth.get("comp_iv_level")
         components["regime_v7"] = truth.get("regime")
     else:
-        components["fear_truth_v7"] = None
-        components["fear_greed_v7"] = None
-        components["regime_v7"] = None
-
-    # ── 8) 恐惧贪婪综合指数 ──
-    fg = compute_fear_greed(components)
-
-    # ── 9) 现货位置信号 ──
-    spot = get_spot_signals_for_date(date_str, days=400)
-    if spot:
-        components["spot"] = spot
-        components["spot_source"] = "real"
-    else:
-        components["spot"] = None
-        components["spot_source"] = "unavailable"
-    spot_score = _spot_to_score(spot)
-    components["spot_score"] = spot_score
-
-    # ── 10) 合成 + 百分位 + regime ──
-    composite = compute_composite_score(fg, spot_score)
-    components["composite_score"] = composite
-
-    # composite 滚动百分位（基于 vix_history 中的 composite_score 历史）
-    composite_pct = _compute_composite_percentile(composite)
-    components["composite_percentile"] = composite_pct
-
-    # regime 基于百分位
-    composite_regime = classify_by_percentile(composite_pct)
+        for k in ("fear_truth_v7", "fear_greed_v7", "regime_v7"):
+            components[k] = None
 
     return VixSnapshot(
         date=date_str,
         vix=synthetic_vix,
         vix_source=vix_source,
-        vix_zscore=zscore,
+        vix_zscore=large_c.get("zscore"),
         iv_50etf=components.get("iv_50etf"),
         iv_300etf=components.get("iv_300etf"),
         iv_500etf=components.get("iv_500etf"),
@@ -760,18 +902,18 @@ def compute_today_snapshot(date_str: Optional[str] = None,
         pcr_call_volume=components.get("pcr_call_volume"),
         pcr_put_volume=components.get("pcr_put_volume"),
         pcr_source=components.get("pcr_source", "unavailable"),
-        rv_hs300=rv_hs300,
-        rv_zz1000=rv_zz1000,
-        rv_blended=rv_blended,
+        rv_hs300=large_c.get("rv"),
+        rv_zz1000=small_c.get("rv"),
+        rv_blended=large_c.get("rv"),
         margin_balance=components.get("margin_balance"),
         margin_source=components.get("margin_source", "unavailable"),
         limit_up_count=components.get("limit_up_count"),
         limit_down_count=components.get("limit_down_count"),
         limit_source=components.get("limit_source", "unavailable"),
-        fear_greed=fg,
-        composite_score=composite,
-        composite_regime=composite_regime,
-        composite_percentile=composite_pct,
+        fear_greed=large_fg,
+        composite_score=large_fg,
+        composite_regime=large_c.get("regime"),
+        composite_percentile=large_pct,
         fear_truth_v7=components.get("fear_truth_v7"),
         fear_greed_v7=components.get("fear_greed_v7"),
         comp_drawdown_v7=components.get("comp_drawdown_v7"),
@@ -779,28 +921,76 @@ def compute_today_snapshot(date_str: Optional[str] = None,
         comp_iv_surge_v7=components.get("comp_iv_surge_v7"),
         comp_iv_level_v7=components.get("comp_iv_level_v7"),
         regime_v7=components.get("regime_v7"),
-        spot_close=spot.get("spot_close") if spot else None,
-        spot_ma60_dev=spot.get("spot_ma60_dev") if spot else None,
-        spot_mom_5d=spot.get("spot_mom_5d") if spot else None,
-        spot_mom_20d=spot.get("spot_mom_20d") if spot else None,
-        spot_new_high_ratio=spot.get("spot_new_high_ratio") if spot else None,
+        spot_close=large_c.get("spot", {}).get("spot_close") if large_c.get("spot") else None,
+        spot_ma60_dev=large_c.get("spot", {}).get("spot_ma60_dev") if large_c.get("spot") else None,
+        spot_mom_5d=large_c.get("spot", {}).get("spot_mom_5d") if large_c.get("spot") else None,
+        spot_mom_20d=large_c.get("spot", {}).get("spot_mom_20d") if large_c.get("spot") else None,
+        spot_new_high_ratio=large_c.get("spot", {}).get("spot_new_high_ratio") if large_c.get("spot") else None,
+        large_vix=large_c.get("vix"),
+        large_zscore=large_c.get("zscore"),
+        large_fg=large_fg,
+        large_percentile=large_pct,
+        large_regime=large_c.get("regime"),
+        large_rv=large_c.get("rv"),
+        large_spot_score=large_c.get("spot_score"),
+        small_vix=small_c.get("vix"),
+        small_zscore=small_c.get("zscore"),
+        small_fg=small_fg,
+        small_percentile=small_pct,
+        small_regime=small_c.get("regime"),
+        small_rv=small_c.get("rv"),
+        small_spot_score=small_c.get("spot_score"),
         components=components,
     )
 
 
-def compute_and_store(date_str: Optional[str] = None) -> Optional[VixSnapshot]:
-    """计算 + 写入 DB。返回快照。"""
-    snap = compute_today_snapshot(date_str)
+def compute_and_store(date_str: Optional[str] = None,
+                      progress=None,
+                      task_runner=None) -> Optional[VixSnapshot]:
+    """计算 + 写入 DB。返回快照。
+
+    非交易日防护（2026-08-30）：live 路径（date_str=None）落在周末/节假日时，
+    自动回退到最近一个交易日——否则会用上一交易日的 QVIX/行情造出一条
+    「日期是今天但 PCR/构造分全缺」的垃圾行（2026-06-07、2026-08-30 即此问题）。
+    入库后同步重算滚动百分位（含 fg7/large/small/composite）并刷新大小盘
+    拆分轨道，保证当日读数立即可用；失败仅告警不阻塞主快照。
+    """
+    if not date_str:
+        probe = datetime.now()
+        for _ in range(20):
+            if _is_trading_day(probe.strftime("%Y-%m-%d")):
+                break
+            probe -= timedelta(days=1)
+        date_str = probe.strftime("%Y-%m-%d")
+
+    snap = compute_today_snapshot(date_str, progress=progress)
     if snap is None:
         return None
     try:
         upsert_vix_history(snap.date, snap.to_db_payload())
         logger.info(
-            f"VIX 快照入库: {snap.date} VIX={snap.vix} FG={snap.fear_greed} "
-            f"composite={snap.composite_score} regime={snap.composite_regime}"
+            f"VIX 快照入库: {snap.date} large(VIX={snap.large_vix} FG={snap.large_fg} "
+            f"pct={snap.large_percentile}) small(VIX={snap.small_vix} FG={snap.small_fg} "
+            f"pct={snap.small_percentile})"
         )
     except Exception as e:
         logger.error(f"VIX 入库失败: {e}", exc_info=True)
+
+    try:
+        if progress:
+            progress("重算滚动百分位 + regime")
+        recompute_percentiles()
+    except Exception as e:
+        logger.warning(f"compute_and_store: recompute_percentiles 失败: {e}")
+
+    try:
+        if progress:
+            progress("更新大小盘拆分轨道")
+        from backend.services.fear_greed_tracks import recompute_track_history
+        recompute_track_history(task_runner=task_runner)
+    except Exception as e:
+        logger.warning(f"compute_and_store: 拆分轨道更新失败: {e}")
+
     return snap
 
 
@@ -926,6 +1116,13 @@ def backfill_vix_history(
         except Exception as e:
             logger.warning(f"recompute_percentiles 失败: {e}")
             result["percentiles_error"] = str(e)
+        try:
+            from backend.services.fear_greed_tracks import recompute_track_history
+            track_result = recompute_track_history(task_runner=task_runner)
+            result["track_rows"] = track_result.get("rows", 0)
+        except Exception as e:
+            logger.warning(f"拆分轨道更新失败: {e}")
+            result["tracks_error"] = str(e)
 
     if task_runner is not None:
         task_runner.milestone(
@@ -1016,6 +1213,10 @@ def snapshot_to_api(snap_dict: dict) -> dict:
         "fear_truth_v7":       snap_dict.get("fear_truth_v7"),
         "fear_greed_v7":       snap_dict.get("fear_greed_v7"),
         "regime_v7":           snap_dict.get("regime_v7"),
+        # 恐慌贪婪指数（/vix 页面单一主指标）：滚动百分位与 regime 由
+        # recompute_percentiles 落库；缺失时前端必须显示降级而非伪装正常
+        "fg7_percentile":      snap_dict.get("fg7_percentile"),
+        "fg7_regime":          snap_dict.get("fg7_regime"),
         "v7_components": {
             "drawdown":  snap_dict.get("comp_drawdown_v7"),
             "breadth":   snap_dict.get("comp_breadth_v7"),
@@ -1032,6 +1233,41 @@ def snapshot_to_api(snap_dict: dict) -> dict:
             "mom_20d":        snap_dict.get("spot_mom_20d"),
             "new_high_ratio": snap_dict.get("spot_new_high_ratio"),
             "source":         components.get("spot_source", "unknown"),
+        },
+        # v8 大小盘分离轨道（前端主曲线）
+        "tracks": {
+            "large": {
+                "vix":        snap_dict.get("large_vix"),
+                "zscore":     snap_dict.get("large_zscore"),
+                "fg":         snap_dict.get("large_fg"),
+                "percentile": snap_dict.get("large_percentile"),
+                "regime":     snap_dict.get("large_regime"),
+                "rv":         snap_dict.get("large_rv"),
+                "spot_score": snap_dict.get("large_spot_score"),
+                "iv": {
+                    "50etf": snap_dict.get("iv_50etf"),
+                    "300etf": snap_dict.get("iv_300etf"),
+                },
+            },
+            "small": {
+                "vix":        snap_dict.get("small_vix"),
+                "zscore":     snap_dict.get("small_zscore"),
+                "fg":         snap_dict.get("small_fg"),
+                "percentile": snap_dict.get("small_percentile"),
+                "regime":     snap_dict.get("small_regime"),
+                "rv":         snap_dict.get("small_rv"),
+                "spot_score": snap_dict.get("small_spot_score"),
+                "iv": {
+                    "500etf": snap_dict.get("iv_500etf"),
+                    "cyb":    snap_dict.get("iv_cyb"),
+                    "kcb":    snap_dict.get("iv_kcb"),
+                },
+            },
+            "small_large_premium": (
+                round(snap_dict.get("small_vix") - snap_dict.get("large_vix"), 2)
+                if snap_dict.get("small_vix") is not None
+                and snap_dict.get("large_vix") is not None else None
+            ),
         },
         # composite 明细
         "composite": {
@@ -1052,10 +1288,71 @@ def snapshot_to_api(snap_dict: dict) -> dict:
     }
 
 
+def _tracks_to_api(by_track: dict) -> dict:
+    """vix_track_history 行 → 拆分轨道 API 结构（缺失轨道 available=False）。"""
+    from backend.services.fear_greed_tracks import TRACKS
+
+    def _blank(meta) -> dict:
+        return {
+            "name": meta["name"], "available": False,
+            "greed": None, "percentile": None, "regime": "unknown",
+            "has_iv": bool(meta.get("qvix")),
+            "iv_label": meta.get("iv_label"),
+            "components": {"drawdown": None, "breadth": None,
+                           "iv_surge": None, "iv_level": None},
+        }
+
+    out = {}
+    for key, meta in TRACKS.items():
+        row = by_track.get(key)
+        if not row:
+            out[key] = _blank(meta)
+            continue
+        out[key] = {
+            "name": meta["name"],
+            "available": row.get("greed") is not None,
+            "greed": row.get("greed"),
+            "percentile": row.get("percentile"),
+            "regime": row.get("regime") or "unknown",
+            "uptrend": bool(row.get("uptrend")),
+            "has_iv": bool(meta.get("qvix")),
+            "iv_label": meta.get("iv_label"),
+            "components": {
+                "drawdown": row.get("drawdown"),
+                "breadth": row.get("breadth"),
+                "iv_surge": row.get("iv_surge"),
+                "iv_level": row.get("iv_level"),
+            },
+        }
+    return out
+
+
+def _attach_size_tracks(api_rows: list[dict]) -> list[dict]:
+    """给 API 快照行挂上 size_tracks（批量查 vix_track_history，避免 N+1）。"""
+    from backend.core.database import get_vix_tracks_by_dates
+
+    dates = [r.get("date") for r in api_rows if r.get("date")]
+    if not dates:
+        return api_rows
+    try:
+        track_rows = get_vix_tracks_by_dates(dates)
+    except Exception as e:
+        logger.warning(f"读取拆分轨道失败: {e}")
+        track_rows = {}
+    for r in api_rows:
+        r["size_tracks"] = _tracks_to_api(track_rows.get(r.get("date"), {}))
+    return api_rows
+
+
 def get_latest_api() -> dict:
-    return snapshot_to_api(get_vix_latest() or {})
+    api = snapshot_to_api(get_vix_latest() or {})
+    if api:
+        _attach_size_tracks([api])
+    return api
 
 
 def get_history_api(days: int = 60) -> list[dict]:
     rows = get_vix_history(days)
-    return [snapshot_to_api(r) for r in rows]
+    api_rows = [snapshot_to_api(r) for r in rows]
+    _attach_size_tracks(api_rows)
+    return api_rows

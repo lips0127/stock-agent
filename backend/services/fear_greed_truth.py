@@ -73,6 +73,27 @@ def _fetch_qvix_full() -> Optional[pd.DataFrame]:
     return df[["date", "qvix_50"]].dropna().sort_values("date").reset_index(drop=True)
 
 
+def add_truth_features(df: pd.DataFrame) -> pd.DataFrame:
+    """在指数收盘价序列上追加 v7 构造所需的特征列（无未来泄漏，全 trailing）。
+
+    输入 df 须含 date/close 列。输出追加：drawdown_60、ma60_dev、mom_20d、uptrend。
+    总体构造（build_truth_series）与大小盘拆分轨道（fear_greed_tracks）共用，
+    保证「同一构造」口径不漂移。
+    """
+    df = df.sort_values("date").reset_index(drop=True)
+    close = pd.to_numeric(df["close"], errors="coerce")
+
+    roll_max = close.rolling(_DD_WINDOW).max()
+    df["drawdown_60"] = (close - roll_max) / roll_max * 100.0  # ≤0
+
+    ma = close.rolling(_MA_WINDOW).mean()
+    df["ma60_dev"] = (close - ma) / ma * 100.0
+    df["mom_20d"] = close.pct_change(_MOM_WIN) * 100.0
+    # 体制：均线之上且正动量 → 上涨体制（抑制 IV 类恐惧）
+    df["uptrend"] = (df["ma60_dev"] > 0) & (df["mom_20d"] > 0)
+    return df
+
+
 def build_truth_series(limit_down: Optional[pd.DataFrame] = None) -> Optional[pd.DataFrame]:
     """构建长历史 construct-truth 恐惧分序列。
 
@@ -84,17 +105,9 @@ def build_truth_series(limit_down: Optional[pd.DataFrame] = None) -> Optional[pd
     if sh is None or sh.empty:
         logger.warning("fear_greed_truth: 上证综指日线为空")
         return None
-    df = sh.sort_values("date").reset_index(drop=True)[["date", "close"]].copy()
+    df = sh[["date", "close"]].copy()
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
-
-    roll_max = df["close"].rolling(_DD_WINDOW).max()
-    df["drawdown_60"] = (df["close"] - roll_max) / roll_max * 100.0  # ≤0
-
-    ma = df["close"].rolling(_MA_WINDOW).mean()
-    df["ma60_dev"] = (df["close"] - ma) / ma * 100.0
-    df["mom_20d"] = df["close"].pct_change(_MOM_WIN) * 100.0
-    # 体制：均线之上且正动量 → 上涨体制（抑制 IV 类恐惧）
-    df["uptrend"] = (df["ma60_dev"] > 0) & (df["mom_20d"] > 0)
+    df = add_truth_features(df)
 
     qvix = _fetch_qvix_full()
     if qvix is None:
@@ -122,12 +135,22 @@ def build_truth_series(limit_down: Optional[pd.DataFrame] = None) -> Optional[pd
     return out
 
 
-def _score_row(r: pd.Series) -> dict:
-    dd = r.get("drawdown_60")
-    uptrend = bool(r.get("uptrend")) if pd.notna(r.get("uptrend")) else False
-    iv_surge = r.get("qvix_chg5")
-    iv_pct = r.get("qvix_pct_252")
-    ld = r.get("limit_down_count")
+def score_components(drawdown_60, uptrend, iv_surge_chg5=None, iv_level_pct=None,
+                     limit_down_count=None) -> dict:
+    """v7 构造分评分核心：给定分量原始值 → 构造分与分量拆解。
+
+    抽取自 _score_row，供总体构造与 per-index 拆分轨道共用同一公式与权重：
+      - 价格回撤锚：|drawdown_60| / 12% 封顶（主导分量）
+      - 广度崩塌：跌停家数 / 500 封顶；缺失时显式降权并标记
+      - IV 飙升：5 日变化率 / 30% 封顶；上涨体制打 0.3 折
+      - IV 水平：252 日分位；仅下跌体制贡献
+    缺失分量权重按比例分摊到可用分量。返回 dict 与 _score_row 同构。
+    """
+    dd = drawdown_60
+    uptrend = bool(uptrend) if uptrend is not None else False
+    iv_surge = iv_surge_chg5
+    iv_pct = iv_level_pct
+    ld = limit_down_count
 
     comp_drawdown = _clip01(-float(dd) / _DD_FULL_FEAR_PCT) * 100.0 if pd.notna(dd) else None
 
@@ -163,7 +186,6 @@ def _score_row(r: pd.Series) -> dict:
     else:
         fear = sum(active[k] * _W[k] for k in active) / total_w
 
-    regime = "uptrend" if uptrend else "downtrend"
     return {
         "fear_truth": round(fear, 2),
         "comp_drawdown": None if comp_drawdown is None else round(comp_drawdown, 2),
@@ -171,8 +193,16 @@ def _score_row(r: pd.Series) -> dict:
         "comp_iv_surge": None if comp_iv_surge is None else round(comp_iv_surge, 2),
         "comp_iv_level": None if comp_iv_level is None else round(comp_iv_level, 2),
         "breadth_available": bool(breadth_available),
-        "regime": regime,
+        "regime": "uptrend" if uptrend else "downtrend",
     }
+
+
+def _score_row(r: pd.Series) -> dict:
+    return score_components(
+        r.get("drawdown_60"), r.get("uptrend"),
+        iv_surge_chg5=r.get("qvix_chg5"), iv_level_pct=r.get("qvix_pct_252"),
+        limit_down_count=r.get("limit_down_count"),
+    )
 
 
 def latest_truth() -> Optional[dict]:

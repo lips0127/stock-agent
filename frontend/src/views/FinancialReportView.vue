@@ -1,7 +1,6 @@
 <template>
   <div class="finreport-page">
     <div class="finreport-page__ambient" aria-hidden="true">
-      <GradientBlob position="tr" size="lg" />
     </div>
 
     <PageHeader
@@ -105,7 +104,6 @@ import { analyzeFinancialReport } from '../api'
 import PageHeader from '../components/ui/PageHeader.vue'
 import ModernCard from '../components/ui/ModernCard.vue'
 import EmptyHint from '../components/ui/EmptyHint.vue'
-import GradientBlob from '../components/ui/GradientBlob.vue'
 import StockDashboard from '../components/stock/StockDashboard.vue'
 
 const reportText = ref('')

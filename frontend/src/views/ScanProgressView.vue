@@ -15,24 +15,21 @@
     </PageHeader>
 
     <div v-if="task" class="overview-grid">
-      <StatCard label="总计" :value="task.total || '—'" icon="⊟" />
-      <StatCard label="已处理" :value="task.done || 0" icon="✓" />
+      <StatCard label="总计" :value="task.total || '-'" />
+      <StatCard label="已处理" :value="task.done || 0" />
       <StatCard
         label="有效结果"
         :value="task.result_count ?? task.success_count ?? scannedCount"
         tone="accent"
-        icon="★"
       />
       <StatCard
         :label="`失败 (${failRate})`"
         :value="failCount"
         :tone="failCount > 0 ? 'danger' : 'muted'"
-        icon="!"
       />
       <StatCard
         label="进度"
         :value="`${task.total > 0 ? Math.round((task.done / task.total) * 100) : 0}%`"
-        icon="↗"
       />
     </div>
 
@@ -298,7 +295,7 @@ onUnmounted(() => {
 }
 .progress-bar__fill {
   height: 100%;
-  background: linear-gradient(90deg, #2563eb 0%, #3b82f6 100%);
+  background: var(--color-accent);
   border-radius: var(--radius-full);
   transition: width var(--duration-slow) var(--ease);
 }
@@ -422,7 +419,7 @@ onUnmounted(() => {
 }
 .result-banner--success .result-banner__icon {
   background: var(--color-success);
-  color: white;
+  color: var(--color-text-inverse);
 }
 .result-banner--warning {
   background: var(--color-warning-soft);
@@ -430,7 +427,7 @@ onUnmounted(() => {
 }
 .result-banner--warning .result-banner__icon {
   background: var(--color-warning);
-  color: white;
+  color: var(--color-text-inverse);
 }
 .result-banner--danger {
   background: var(--color-danger-soft);
@@ -438,7 +435,7 @@ onUnmounted(() => {
 }
 .result-banner--danger .result-banner__icon {
   background: var(--color-danger);
-  color: white;
+  color: var(--color-text-inverse);
 }
 .result-banner--muted {
   background: var(--color-bg-muted);
@@ -446,7 +443,7 @@ onUnmounted(() => {
 }
 .result-banner--muted .result-banner__icon {
   background: var(--color-text-tertiary);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 /* 任务日志面板 */
@@ -457,7 +454,7 @@ onUnmounted(() => {
   max-height: 360px;
   overflow-y: auto;
   padding: var(--space-3);
-  background: var(--color-bg-base);
+  background: var(--color-bg-page);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   font-family: var(--font-mono);

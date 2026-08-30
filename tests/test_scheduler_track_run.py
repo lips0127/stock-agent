@@ -45,9 +45,15 @@ class TestSchedulerTaskRunnerIntegration(unittest.TestCase):
         from backend.services.scheduler import daily_vix_task
         from backend.core.database import get_recent_task_runs
 
-        # Mock the heavy work inside daily_vix_task
-        with patch("backend.services.vix_service.compute_and_store") as mock:
-            mock.return_value = None
+        # Mock both VIX generations: neither scheduler integration test nor
+        # its imports may touch a live market-data source.
+        with patch("backend.services.vix_service.compute_and_store",
+                   return_value=None), patch(
+            "backend.services.vix2_service.compute_and_store_vix2",
+            return_value=None,
+        ), patch(
+            "backend.services.vix2_service.recompute_vix2_percentiles",
+        ):
             daily_vix_task()
 
         # task_runs should have one row

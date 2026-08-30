@@ -65,7 +65,7 @@ function buildOption() {
         data: pes,
         smooth: true,
         showSymbol: false,
-        lineStyle: { color: '#8b5cf6', width: 1.4 },
+        lineStyle: { color: '#2563eb', width: 1.4 },
         areaStyle: {
           color: {
             type: 'linear', x: 0, y: 0, x2: 0, y2: 1,

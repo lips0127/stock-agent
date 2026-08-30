@@ -12,14 +12,18 @@ logger = logging.getLogger(__name__)
 def get_stock(symbol):
     try:
         data = get_stock_metrics(symbol)
-        return jsonify({
-            "code": symbol,
-            "name": data["名称"],
-            "price": data["最新价"],
-            "dividend_yield": data["股息率"],
-            "dividend_per_share": data["每股分红"],
-            "dividend_note": data["分红备注"],
-        })
-    except Exception as e:
-        logger.error(f"Error fetching stock {symbol}: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 400
+    except Exception:
+        # 上游行情源异常：不得把内部错误串回显给客户端
+        logger.error(f"Error fetching stock {symbol}", exc_info=True)
+        return jsonify({"error": "行情源暂时不可用，请稍后重试", "degraded": True}), 502
+    if data is None:
+        # 所有数据源都拿不到行情：代码不存在或源全部失败
+        return jsonify({"error": "无法获取该股票行情，请确认代码是否正确或稍后重试"}), 404
+    return jsonify({
+        "code": symbol,
+        "name": data["名称"],
+        "price": data["最新价"],
+        "dividend_yield": data["股息率"],
+        "dividend_per_share": data["每股分红"],
+        "dividend_note": data["分红备注"],
+    })

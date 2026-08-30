@@ -1,5 +1,16 @@
-# ── 构建阶段 ──
-FROM python:3.11-slim AS builder
+# ── 阶段 1：前端构建（单容器部署：产物由 Flask 直接服务） ──
+FROM node:22-alpine AS frontend-builder
+
+WORKDIR /web
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+# ── 阶段 2：Python 依赖构建 ──
+FROM python:3.11-slim-bookworm AS python-builder
 
 WORKDIR /build
 
@@ -8,31 +19,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements-production.txt requirements.txt
+COPY backend/requirements-production.txt requirements-production.txt
 
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements-production.txt
 
-# ── 运行阶段 ──
-FROM python:3.11-slim
+# ── 阶段 3：运行时（API + 前端静态产物同容器） ──
+FROM python:3.11-slim-bookworm
 
 LABEL maintainer="stock-agent"
-LABEL description="A 股股息监测系统 Python 后端"
+LABEL description="A 股研究与风险辅助看板（前后端一体单容器）"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libffi7 \
+    libffi8 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -g 1001 appuser && useradd -u 1001 -g appuser -d /app -s /sbin/nologin appuser
 
 WORKDIR /app
 
-COPY --from=builder /install /usr/local
+COPY --from=python-builder /install /usr/local
 
-COPY . ./
+COPY --chown=appuser:appuser backend /app/backend
+
+# 前端产物：create_app() 的静态回退直接从该目录服务 SPA
+COPY --from=frontend-builder --chown=appuser:appuser /web/dist /app/frontend/dist
 
 RUN mkdir -p /data/cache /data/logs /data && chown -R appuser:appuser /data /app
 
-RUN chmod +x entrypoint.sh && chown appuser:appuser entrypoint.sh
+RUN sed -i 's/\r$//' /app/backend/entrypoint.sh \
+    && chmod +x /app/backend/entrypoint.sh
 
 USER appuser
 
@@ -43,11 +58,13 @@ ENV PYTHONUNBUFFERED=1 \
     CACHE_DIR=/data/cache \
     LOG_DIR=/data/logs \
     LOG_LEVEL=INFO \
-    GUNICORN_WORKERS=2
+    FRONTEND_DEV_PROXY=false \
+    SCHEDULER_ENABLED=true \
+    GUNICORN_WORKERS=1
 
 EXPOSE 5000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" || exit 1
+    CMD /usr/local/bin/python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')" || exit 1
 
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["/app/backend/entrypoint.sh"]

@@ -20,6 +20,16 @@ from backend.config import (
 
 logger = logging.getLogger(__name__)
 
+# 分红时效闸门（天）：最近一次分红证据（实施分红的股权登记日，或未实施方案的
+# 最新公告日）距今超过该天数，即视为「当前不分红」，股息率记 0。
+# 背景（2026-08-30 修复）：东方财富分红明细是全量历史，停发分红的公司（多为
+# 基本面恶化、股价已大幅下跌）仍保留着多年前的巨额分红记录；若不加时效约束，
+# 「最近一个有年报分红的财年」会选中远古财年，用旧分红 ÷ 现价得出 50%+ 的
+# 假股息率，恰好把这类公司送上高股息榜前排（如 2021 年 10 派 27 的振东制药、
+# FY2022 后停发的万科 A）。年报分红按规则应在次年年中前实施，约一年一轮，
+# 取 400 天（约 13 个月）可容忍派息日小幅后移，同时足以排除真正停发的公司。
+STALE_DIVIDEND_DAYS = 400
+
 
 def _retry(do, retries: int = None, backoff: float = None):
     """对瞬时网络错误（连接重置/超时/5xx）做指数退避重试。
@@ -280,13 +290,30 @@ def get_stock_metrics(symbol: str) -> dict:
                 df_confirmed['_财年'] = df_confirmed['_报告期'].dt.year
                 df_confirmed['_is_annual'] = df_confirmed['_报告期'].dt.month == 12
 
-                # 找最近一个有年报分红的完整财年
-                annual_years = sorted(
-                    df_confirmed[df_confirmed['_is_annual'] & df_confirmed['现金分红-现金分红比例'].notna()]['_财年'].unique(),
-                    reverse=True
+                # 时效闸门：分红证据取「实施分红的股权登记日」，未实施方案回退到
+                # 最新公告日；超过 STALE_DIVIDEND_DAYS 天无任何分红证据 → 当前不分红，
+                # 股息率记 0，不得用远古分红除以现价冒充当前股息率。
+                df_confirmed['_证据日'] = pd.to_datetime(
+                    df_confirmed['股权登记日'], errors='coerce'
+                ).fillna(pd.to_datetime(df_confirmed['最新公告日期'], errors='coerce'))
+                last_evidence = df_confirmed['_证据日'].max()
+                days_since_div = (
+                    (pd.Timestamp.now() - last_evidence).days
+                    if pd.notna(last_evidence) else None
                 )
 
-                if annual_years:
+                if days_since_div is None or days_since_div > STALE_DIVIDEND_DAYS:
+                    last_str = (
+                        last_evidence.strftime('%Y-%m-%d')
+                        if pd.notna(last_evidence) else "无日期"
+                    )
+                    dividend_note = f"近{STALE_DIVIDEND_DAYS}天无分红(最后:{last_str})"
+                    total_cash_per_10 = 0.0
+                # 找最近一个有年报分红的完整财年
+                elif (annual_years := sorted(
+                    df_confirmed[df_confirmed['_is_annual'] & df_confirmed['现金分红-现金分红比例'].notna()]['_财年'].unique(),
+                    reverse=True
+                )):
                     target_year = annual_years[0]
                     year_divs = df_confirmed[
                         (df_confirmed['_财年'] == target_year) &

@@ -22,7 +22,7 @@
 <script setup>
 defineProps({
   label: { type: String, default: '' },
-  value: { type: [String, Number], default: '—' },
+  value: { type: [String, Number], default: '-' },
   hint: { type: String, default: '' },
   icon: { type: String, default: '' },
   tone: {
@@ -66,14 +66,6 @@ defineProps({
 
 .stat-card:hover {
   border-color: var(--color-border-strong);
-  box-shadow: var(--shadow-sm);
-  transform: translateY(-2px);
-}
-.stat-card--accent:hover {
-  box-shadow: var(--shadow-glow);
-}
-.stat-card--glass:hover {
-  box-shadow: var(--shadow-md);
 }
 
 /* ── Head ── */
@@ -102,13 +94,13 @@ defineProps({
 
 /* ── Value ── */
 .stat-card__value {
+  font-family: var(--font-mono);
   font-size: var(--text-3xl);
   font-weight: var(--weight-semibold);
   color: var(--color-text-primary);
   line-height: var(--leading-tight);
   letter-spacing: -0.025em;
   font-variant-numeric: tabular-nums;
-  font-feature-settings: 'tnum';
 }
 
 .stat-card__hint {
@@ -126,16 +118,13 @@ defineProps({
 .stat-card--muted .stat-card__value   { color: var(--color-text-tertiary); }
 
 .stat-card--accent {
-  background: linear-gradient(135deg, #eef2ff 0%, #ffffff 60%);
-  border-color: rgba(79, 70, 229, 0.12);
+  background: var(--color-accent-soft);
+  border-color: rgba(37, 99, 235, 0.14);
 }
 .stat-card--accent .stat-card__value { color: var(--color-accent-text); }
 .stat-card--accent .stat-card__label { color: var(--color-accent-text); }
 
 .stat-card--glass {
-  background: var(--color-bg-glass);
-  backdrop-filter: blur(16px) saturate(160%);
-  -webkit-backdrop-filter: blur(16px) saturate(160%);
-  border-color: rgba(228, 228, 231, 0.7);
+  background: var(--color-bg-elevated);
 }
 </style>

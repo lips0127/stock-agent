@@ -1,24 +1,15 @@
 <template>
   <div class="dashboard">
-    <!-- 装饰性渐变光晕（背景层） -->
-    <div class="dashboard__ambient" aria-hidden="true">
-      <GradientBlob position="tr" size="lg" :intensity="0.85" />
-      <GradientBlob position="bl" size="md" :intensity="0.55" c1="#f0f9ff" c3="rgba(186, 230, 253, 0.4)" />
-    </div>
-
     <!-- 欢迎头部 -->
     <PageHeader
       :title="greeting"
       :subtitle="`实时指数、高股息榜单与扫描任务日志 · 共 ${stocks.length} 只高股息标的`"
       size="lg"
     >
-      <template #icon>
-        <span class="welcome-glyph">📊</span>
-      </template>
       <template #meta>
         <span class="meta-item">
-          <span class="meta-dot" :class="{ 'meta-dot--pulse': !anyLoading }" />
-          数据已同步 · {{ lastSyncLabel }}
+          <span class="meta-dot" :class="{ 'meta-dot--ok': !anyLoading }" />
+          数据已同步 {{ lastSyncLabel }}
         </span>
         <span class="meta-divider" />
         <span class="meta-item">
@@ -27,15 +18,14 @@
         </span>
         <span class="meta-divider" />
         <span class="meta-item">
-          <span class="meta-tag">管理员</span>
           {{ auth.username }}
         </span>
       </template>
       <template #actions>
-        <el-button :icon="RefreshRight" @click="refreshAll" :loading="anyLoading" round>
+        <el-button :icon="RefreshRight" @click="refreshAll" :loading="anyLoading">
           刷新数据
         </el-button>
-        <el-button type="primary" :icon="Search" @click="handleFullRefresh" :loading="fullRefreshing" round>
+        <el-button type="primary" :icon="Search" @click="handleFullRefresh" :loading="fullRefreshing">
           全市场扫描
         </el-button>
       </template>
@@ -46,7 +36,6 @@
       <StatCard
         label="监控指数"
         :value="indices.length"
-        icon="📈"
         tone="default"
         hint="覆盖上证/深证/创业板/科创50/沪深300"
       >
@@ -58,7 +47,6 @@
       <StatCard
         label="高股息标的"
         :value="stocks.length"
-        icon="💎"
         tone="accent"
         :hint="`按股息率倒序 TOP ${stocks.length}`"
       />
@@ -66,7 +54,6 @@
       <StatCard
         label="今日任务"
         :value="logs.length"
-        icon="🗂"
         tone="default"
         :hint="`最近 ${logs.length} 条扫描记录`"
       >
@@ -77,19 +64,12 @@
         </template>
       </StatCard>
 
-      <StatCard
-        label="组合总盈亏"
-        :value="formatPnl(totalPnl)"
-        icon="💰"
-        :tone="pnlTone"
-        :hint="pnlHint"
-      />
     </section>
 
     <!-- VIX 恐慌指数 + 恐惧贪婪 -->
     <ModernCard
-      title="VIX 恐慌指数"
-      description="50ETF 期权隐含波动率 + 已实现波动率 + 情绪面合成"
+      title="恐慌贪婪指数"
+      description="单一情绪读数 · 0=极度恐慌 100=极度贪婪"
       variant="bordered"
     >
       <template #extra>
@@ -101,31 +81,11 @@
 
       <div v-if="vix" class="vix-row">
         <VixGauge
-          :value="vix.composite_score"
-          :percentile="vix.composite_percentile"
-          :regime="vix.composite_regime"
-          :vix="vix.vix"
-          :vix-zscore="vix.vix_zscore"
+          :value="vix.fear_greed_v7"
+          :percentile="vix.fg7_percentile"
+          :regime="vix.fg7_regime || 'unknown'"
         />
-        <div class="vix-fg">
-          <div class="vix-fg__label">恐惧贪婪综合指数</div>
-          <div class="vix-fg__value">
-            <span class="vix-fg__num">{{ vix.fear_greed != null ? vix.fear_greed.toFixed(0) : '—' }}</span>
-            <span class="vix-fg__max">/ 100</span>
-          </div>
-          <div class="vix-fg__bar">
-            <div
-              class="vix-fg__fill"
-              :class="`vix-fg__fill--${fgBand}`"
-              :style="{ width: (vix.fear_greed || 0) + '%' }"
-            />
-            <div class="vix-fg__ticks">
-              <span style="left:25%">恐慌</span>
-              <span style="left:50%">中性</span>
-              <span style="left:75%">贪婪</span>
-            </div>
-          </div>
-          <div class="vix-subgrid">
+        <div class="vix-subgrid">
             <div class="vix-sub">
               <div class="vix-sub__label">50ETF IV</div>
               <div class="vix-sub__val">{{ fmt(vix.iv_50etf, 2) }}</div>
@@ -149,7 +109,7 @@
             <div class="vix-sub">
               <div class="vix-sub__label">融资余额</div>
               <div class="vix-sub__val">
-                {{ vix.margin_balance != null ? (vix.margin_balance / 10000).toFixed(2) + ' 万亿' : '—' }}
+                {{ vix.margin_balance != null ? (vix.margin_balance / 10000).toFixed(2) + ' 万亿' : '-' }}
               </div>
             </div>
             <div class="vix-sub">
@@ -159,35 +119,23 @@
               </div>
             </div>
           </div>
-        </div>
         <div class="vix-trend-wrap">
           <VixTrendChart :history="vixHistory" />
         </div>
       </div>
-      <div v-if="vix && vix.data_quality" class="vix-quality">
-        <span class="vix-quality__icon">{{ vix.data_quality.missing > 0 ? '⚠️' : '✅' }}</span>
-        <span>数据完整度 <strong>{{ vix.data_quality.real }} / {{ vix.data_quality.total }}</strong> · 缺失：
-          <el-tag
-            v-for="k in dashboardMissingSignals"
-            :key="k"
-            type="warning" size="small" effect="light"
-            style="margin-left: 4px"
-          >{{ missingLabel(k) }}</el-tag>
-        </span>
-        <el-button text type="primary" size="small" @click="router.push('/vix')">
-          详情
-          <el-icon class="el-icon--right"><ArrowRight /></el-icon>
-        </el-button>
+      <div v-if="vix && vix.fear_greed_v7 == null" class="vix-quality vix-quality--warn">
+        <el-icon class="vix-quality__icon is-warn"><WarningFilled /></el-icon>
+        <span>最新交易日构造分缺失，读数与走势按缺口如实显示；可到「恐慌贪婪指数」页重算。</span>
       </div>
       <EmptyHint
-        v-else
-        title="暂无 VIX 数据"
+        v-if="!vix"
+        title="暂无恐慌贪婪指数数据"
         description="可点击下方按钮手动触发计算"
         carded
       >
         <template #action>
-          <el-button :icon="Refresh" type="primary" round :loading="vixRecomputing" @click="handleRecomputeVix">
-            立即计算 VIX
+          <el-button :icon="Refresh" type="primary" :loading="vixRecomputing" @click="handleRecomputeVix">
+            立即计算
           </el-button>
         </template>
       </EmptyHint>
@@ -196,10 +144,20 @@
     <!-- 大盘指数 -->
     <ModernCard
       title="大盘指数"
-      description="实时抓取自新浪行情，每 3 秒刷新"
-      variant="glass"
+      :description="indicesMeta?.degraded
+        ? `部分指数获取失败（成功 ${indicesMeta.coverage?.ok ?? indices.length}/${indicesMeta.coverage?.expected ?? '-'}），数据可能不完整`
+        : '打开页面时从新浪实时抓取'"
     >
       <template #extra>
+        <el-tag
+          v-if="indicesMeta?.degraded || indicesMeta?.unavailable"
+          type="warning"
+          size="small"
+          effect="light"
+          style="margin-right: 8px"
+        >
+          {{ indicesMeta?.unavailable ? '源不可用' : '部分降级' }}
+        </el-tag>
         <el-button
           :icon="Refresh"
           size="small"
@@ -250,12 +208,14 @@ import {
   getVix, getVixHistory, recomputeVix, getTask,
 } from '../api'
 import { ElMessage } from 'element-plus'
-import { Refresh, Search, RefreshRight, ArrowRight, Clock } from '@element-plus/icons-vue'
+import {
+  Refresh, Search, RefreshRight, ArrowRight, Clock,
+  WarningFilled,
+} from '@element-plus/icons-vue'
 
 import PageHeader from '../components/ui/PageHeader.vue'
 import ModernCard from '../components/ui/ModernCard.vue'
 import StatCard from '../components/ui/StatCard.vue'
-import GradientBlob from '../components/ui/GradientBlob.vue'
 import IndexCards from '../components/IndexCards.vue'
 import StockTable from '../components/StockTable.vue'
 import StockSearch from '../components/StockSearch.vue'
@@ -269,6 +229,7 @@ const taskStore = useTaskStore()
 const auth = useAuthStore()
 
 const indices = ref([])
+const indicesMeta = ref(null)
 const stocks = ref([])
 const logs = ref([])
 const indicesLoading = ref(false)
@@ -279,7 +240,6 @@ const searchSymbol = ref('')
 const refreshing = ref(false)
 const fullRefreshing = ref(false)
 
-const totalPnl = ref(0)
 const now = ref(new Date())
 let clockTimer = null
 
@@ -317,39 +277,10 @@ const clockLabel = computed(() => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 })
 
-const pnlTone = computed(() => {
-  if (totalPnl.value > 0) return 'up'
-  if (totalPnl.value < 0) return 'down'
-  return 'default'
-})
-const pnlHint = computed(() => {
-  if (totalPnl.value > 0) return '当前组合处于盈利状态'
-  if (totalPnl.value < 0) return '当前组合处于亏损状态'
-  return '暂无盈亏数据'
-})
-
-// ── VIX ──
-const fgBand = computed(() => {
-  const v = vix.value?.fear_greed
-  if (v == null) return 'neutral'
-  if (v < 25) return 'fear'
-  if (v < 50) return 'fear-soft'
-  if (v < 75) return 'greed-soft'
-  return 'greed'
-})
-
-const DASHBOARD_SIGNAL_LABELS = {
-  vix: 'VIX 主体', rv_chg: 'RV 变化', pcr: 'PCR',
-  margin: '融资余额', limit: '涨跌停', spot: '现货位置',
-}
-const dashboardMissingSignals = computed(() => {
-  const sigs = vix.value?.data_quality?.signals || {}
-  return Object.keys(sigs).filter((k) => !sigs[k])
-})
-function missingLabel(k) { return DASHBOARD_SIGNAL_LABELS[k] || k }
+// ── 恐慌贪婪指数 ──
 
 function fmt(v, digits = 2) {
-  if (v == null || Number.isNaN(v)) return '—'
+  if (v == null || Number.isNaN(v)) return '-'
   return Number(v).toFixed(digits)
 }
 
@@ -370,50 +301,57 @@ async function fetchVixHistory() {
   }
 }
 
+function pollVixTask(taskId) {
+  if (vixPollTimer) clearInterval(vixPollTimer)
+  vixPollTimer = setInterval(async () => {
+    try {
+      const { data: task } = await getTask(taskId)
+      // TaskRunner 终态是 success/failed/cancelled（不是 completed）
+      if (['success', 'failed', 'cancelled'].includes(task?.status)) {
+        clearInterval(vixPollTimer)
+        vixPollTimer = null
+        vixRecomputing.value = false
+        await fetchVix()
+        await fetchVixHistory()
+      }
+    } catch {
+      clearInterval(vixPollTimer)
+      vixPollTimer = null
+      vixRecomputing.value = false
+    }
+  }, 2000)
+}
+
 async function handleRecomputeVix() {
   if (vixRecomputing.value) return
   vixRecomputing.value = true
   try {
     const { data } = await recomputeVix()
-    const taskId = data?.task_id
     ElMessage.success('VIX 重算已提交')
-    if (!taskId) { vixRecomputing.value = false; return }
-    if (vixPollTimer) clearInterval(vixPollTimer)
-    vixPollTimer = setInterval(async () => {
-      try {
-        const { data: task } = await getTask(taskId)
-        if (['completed', 'failed', 'cancelled'].includes(task?.status)) {
-          clearInterval(vixPollTimer)
-          vixPollTimer = null
-          vixRecomputing.value = false
-          await fetchVix()
-          await fetchVixHistory()
-        }
-      } catch {
-        clearInterval(vixPollTimer)
-        vixPollTimer = null
-        vixRecomputing.value = false
-      }
-    }, 2000)
-  } catch (e) {
-    ElMessage.error('VIX 重算失败: ' + (e.response?.data?.error || e.message))
-    vixRecomputing.value = false
+    if (!data?.task_id) { vixRecomputing.value = false; return }
+    pollVixTask(data.task_id)
+  } catch (err) {
+    if (err?.response?.status === 409 && err.response?.data?.task_id) {
+      // 已有同 kind 任务在跑：接管它而不是报错了事
+      ElMessage.info('已有 VIX 重算任务在进行中，已接入其进度')
+      pollVixTask(err.response.data.task_id)
+    } else {
+      ElMessage.error('VIX 重算失败: ' + (err?.response?.data?.error || err.message))
+      vixRecomputing.value = false
+    }
   }
-}
-
-function formatPnl(v) {
-  if (!v) return '¥ 0.00'
-  const sign = v > 0 ? '+' : v < 0 ? '−' : ''
-  return `${sign}¥ ${Math.abs(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 async function fetchIndices() {
   indicesLoading.value = true
   try {
     const { data } = await getLiveIndices()
-    indices.value = data || []
+    // /api/indices/live 返回 {data, source, as_of, coverage, degraded, errors}
+    indices.value = data?.data || []
+    indicesMeta.value = data && Array.isArray(data.data) ? data : null
   } catch {
     indices.value = []
+    indicesMeta.value = null
   } finally {
     indicesLoading.value = false
   }
@@ -504,31 +442,10 @@ onUnmounted(() => {
 
 <style scoped>
 .dashboard {
-  position: relative;
   min-height: calc(100vh - var(--space-12));
 }
 
-/* 装饰背景层 */
-.dashboard__ambient {
-  position: fixed;
-  top: 0; right: 0; bottom: 0; left: var(--layout-sidebar-width);
-  pointer-events: none;
-  z-index: 0;
-  overflow: hidden;
-}
-
-/* 让所有内容浮在装饰背景之上 */
-.dashboard > :not(.dashboard__ambient) {
-  position: relative;
-  z-index: 1;
-}
-
 /* ── PageHeader 内的 meta 元素 ── */
-.welcome-glyph {
-  font-size: 22px;
-  line-height: 1;
-  display: block;
-}
 .meta-item {
   display: inline-flex;
   align-items: center;
@@ -536,6 +453,7 @@ onUnmounted(() => {
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
   font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
 }
 .meta-divider {
   width: 1px;
@@ -547,42 +465,17 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--color-text-tertiary);
 }
-.meta-tag {
-  display: inline-flex;
-  align-items: center;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: var(--radius-sm);
-  background: var(--color-accent-soft);
-  color: var(--color-accent-text);
-  font-size: 10px;
-  font-weight: var(--weight-semibold);
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  margin-right: 4px;
-}
 
-/* 状态指示点 + 脉冲 */
+/* 数据同步状态点：语义状态指示（非装饰），静态不脉冲 */
 .meta-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--color-success);
+  background: var(--color-text-disabled);
   display: inline-block;
-  position: relative;
 }
-.meta-dot--pulse::after {
-  content: '';
-  position: absolute;
-  top: 0; left: 0; right: 0; bottom: 0;
-  border-radius: 50%;
+.meta-dot--ok {
   background: var(--color-success);
-  animation: pulse-ring 1.8s var(--ease) infinite;
-  z-index: -1;
-}
-@keyframes pulse-ring {
-  0%   { transform: scale(1);   opacity: 0.6; }
-  100% { transform: scale(2.8); opacity: 0;   }
 }
 
 /* ── KPI 网格 ── */
@@ -619,13 +512,22 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 .vix-quality__icon {
-  font-size: 13px;
+  font-size: 14px;
 }
+.vix-quality__icon.is-ok { color: var(--color-success); }
+.vix-quality__icon.is-warn { color: var(--color-warning); }
 .vix-quality strong {
   color: var(--color-text-secondary);
   font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;
   margin: 0 2px;
+}
+.vix-quality--warn {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.07);
+  border: 1px solid rgba(180, 83, 9, 0.22);
+  border-radius: var(--radius-lg);
+  margin-top: 0;
 }
 
 /* 响应式：窄屏收紧间距 */
@@ -640,73 +542,12 @@ onUnmounted(() => {
   }
 }
 
-/* ── VIX 行 ── */
+/* ── 恐慌贪婪指数行 ── */
 .vix-row {
   display: grid;
   grid-template-columns: 280px 1fr 1.2fr;
   gap: var(--space-6);
   align-items: stretch;
-}
-
-.vix-fg {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  min-width: 0;
-}
-.vix-fg__label {
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-  color: var(--color-text-tertiary);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.vix-fg__value {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  line-height: 1;
-}
-.vix-fg__num {
-  font-size: 36px;
-  font-weight: var(--weight-bold);
-  color: var(--color-text-primary);
-  letter-spacing: -0.04em;
-  font-variant-numeric: tabular-nums;
-}
-.vix-fg__max {
-  font-size: var(--text-sm);
-  color: var(--color-text-tertiary);
-  font-weight: var(--weight-medium);
-}
-
-.vix-fg__bar {
-  position: relative;
-  height: 8px;
-  border-radius: var(--radius-full);
-  background: linear-gradient(90deg,
-    #fecaca 0%, #fed7aa 25%, #fef3c7 50%, #d1fae5 75%, #a7f3d0 100%);
-  overflow: hidden;
-  margin-top: 4px;
-}
-.vix-fg__fill {
-  position: absolute;
-  top: 0; bottom: 0; right: 0;
-  background: rgba(24, 24, 27, 0.65);
-  border-radius: var(--radius-full);
-  transition: width 600ms var(--ease);
-}
-.vix-fg__ticks {
-  position: relative;
-  height: 14px;
-  margin-top: 4px;
-  font-size: 10px;
-  color: var(--color-text-tertiary);
-}
-.vix-fg__ticks span {
-  position: absolute;
-  transform: translateX(-50%);
-  white-space: nowrap;
 }
 
 .vix-subgrid {
@@ -732,6 +573,7 @@ onUnmounted(() => {
   letter-spacing: 0.02em;
 }
 .vix-sub__val {
+  font-family: var(--font-mono);
   font-size: var(--text-base);
   font-weight: var(--weight-semibold);
   color: var(--color-text-primary);

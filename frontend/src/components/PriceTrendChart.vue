@@ -67,7 +67,7 @@ function buildOption() {
     .map((m) => ({
       name: m.label || '情绪',
       value: [m.date, m.value],
-      itemStyle: { color: m.color || '#6366f1', opacity: 0.6 },
+      itemStyle: { color: m.color || '#2563eb', opacity: 0.6 },
     }))
 
   const hasMarkers = props.markers.length > 0
@@ -136,11 +136,11 @@ function buildOption() {
         max: props.markerMax,
         position: 'right',
         splitLine: { show: false },
-        axisLabel: { color: '#6366f1', fontSize: 10 },
+        axisLabel: { color: '#2563eb', fontSize: 10 },
         axisLine: { show: false },
         axisTick: { show: false },
         name: props.markerLabel,
-        nameTextStyle: { color: '#6366f1', fontSize: 10, padding: [0, 0, 0, -28] },
+        nameTextStyle: { color: '#2563eb', fontSize: 10, padding: [0, 0, 0, -28] },
       }] : []),
     ],
     series: [
@@ -150,7 +150,7 @@ function buildOption() {
         data: closes,
         smooth: true,
         showSymbol: false,
-        lineStyle: { color: '#4f46e5', width: 1.6 },
+        lineStyle: { color: '#1d4ed8', width: 1.6 },
         areaStyle: {
           color: {
             type: 'linear',

@@ -51,10 +51,7 @@ defineProps({
 
 /* ── Variants ── */
 .modern-card--glass {
-  background: var(--color-bg-glass);
-  backdrop-filter: blur(16px) saturate(160%);
-  -webkit-backdrop-filter: blur(16px) saturate(160%);
-  border-color: rgba(228, 228, 231, 0.7);
+  background: var(--color-bg-elevated);
 }
 .modern-card--bordered {
   border-width: 2px;
@@ -67,9 +64,6 @@ defineProps({
   transform: translateY(-2px);
   box-shadow: var(--shadow-md);
   border-color: var(--color-border-strong);
-}
-.modern-card--glass.modern-card--hoverable:hover {
-  box-shadow: var(--shadow-lg);
 }
 
 /* ── Header ── */

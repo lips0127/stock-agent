@@ -2,7 +2,11 @@ import axios from 'axios'
 import router from '../router'
 import { useAuthStore } from '../stores/auth'
 
-const api = axios.create({ baseURL: '/api' })
+const api = axios.create({
+  baseURL: '/api',
+  // 大分页扫描表 / live 指数最坏 ~10s，30s 是安全上限；超时错误统一走 catch
+  timeout: 30000,
+})
 
 api.interceptors.request.use((config) => {
   const auth = useAuthStore()
@@ -41,6 +45,9 @@ export const fullRefreshData = () => api.post('/full_refresh')
 
 export const getTasks = () => api.get('/tasks')
 
+// 当前运行中的任务（/vix 页加载时据此恢复重算/回填进度展示，防重复触发）
+export const getTasksActive = () => api.get('/tasks/active')
+
 export const getTask = (taskId) => api.get(`/tasks/${taskId}`)
 
 export const getTaskProgress = (taskId) => api.get(`/tasks/${taskId}/progress`)
@@ -48,8 +55,25 @@ export const getTaskProgress = (taskId) => api.get(`/tasks/${taskId}/progress`)
 export const getTaskLogs = (taskId, sinceId = 0) =>
   api.get(`/tasks/${taskId}/logs`, { params: { since_id: sinceId } })
 
-export const getAllStocks = (page, pageSize, scanType) =>
-  api.get('/all_stocks', { params: { page, page_size: pageSize, ...(scanType ? { scan_type: scanType } : {}) } })
+// q/min_yield 为服务端全量过滤（代码/名称子串、股息率下限），跨页生效
+export const getAllStocks = (page, pageSize, scanType, q, minYield) =>
+  api.get('/all_stocks', {
+    params: {
+      page,
+      page_size: pageSize,
+      ...(scanType ? { scan_type: scanType } : {}),
+      ...(q ? { q } : {}),
+      ...(minYield != null ? { min_yield: minYield } : {}),
+    },
+  })
+
+// 自选股观察池（Core）：报价聚合带 source/as_of/coverage/degraded
+export const getWatchlist = () => api.get('/watchlist')
+export const addWatchStock = (code, note = '') =>
+  api.post('/watchlist', { code, note })
+export const updateWatchStock = (code, note) =>
+  api.patch(`/watchlist/${code}`, { note })
+export const deleteWatchStock = (code) => api.delete(`/watchlist/${code}`)
 
 export const getLogs = () => api.get('/logs')
 
@@ -103,34 +127,6 @@ export const getSentimentPost = (postId) =>
 export const refreshSentimentPostContent = (postId) =>
   api.post(`/sentiment/posts/${postId}/refresh_content`)
 
-// 知乎大V监控
-export const getZhihuUsers = () => api.get('/zhihu/users')
-export const addZhihuUser = (url) => api.post('/zhihu/users', { url })
-export const deleteZhihuUser = (id) => api.delete(`/zhihu/users/${id}`)
-export const patchZhihuUser = (id, data) => api.patch(`/zhihu/users/${id}`, data)
-export const refreshZhihuUser = (id, opts = {}) =>
-  api.post(`/zhihu/users/${id}/refresh`, null, { params: opts })
-export const getZhihuRefreshStatus = (taskId) => api.get(`/zhihu/refresh_status/${taskId}`)
-export const analyzeRecentZhihuUser = (id, limit = 10) =>
-  api.post(`/zhihu/users/${id}/analyze_recent`, null, { params: { limit } })
-export const getZhihuAnalyzeStatus = (taskId) => api.get(`/zhihu/analyze_status/${taskId}`)
-export const getZhihuUserPosts = (id, limit = 30) => api.get(`/zhihu/users/${id}/posts`, { params: { limit } })
-export const getZhihuAnalysis = (postId) => api.get(`/zhihu/posts/${postId}/analysis`)
-export const reanalyzeZhihuPost = (postId) => api.post(`/zhihu/posts/${postId}/reanalyze`)
-
-export const getZhihuSubscriptions = () => api.get('/zhihu/subscriptions')
-export const addZhihuSubscription = (data) => api.post('/zhihu/subscriptions', data)
-export const deleteZhihuSubscription = (id) => api.delete(`/zhihu/subscriptions/${id}`)
-export const patchZhihuSubscription = (id, data) => api.patch(`/zhihu/subscriptions/${id}`, data)
-
-export const getZhihuEmailSettings = () => api.get('/zhihu/email_settings')
-export const saveZhihuEmailSettings = (data) => api.post('/zhihu/email_settings', data)
-export const testZhihuEmail = (email) => api.post('/zhihu/email_test', { email })
-export const getZhihuEmailLogs = (limit = 50) => api.get('/zhihu/logs', { params: { limit } })
-
-// 大V时间线报表
-export const getZhihuTimeline = (days = 7) => api.get('/zhihu/timeline', { params: { days } })
-
 // 市场分时K线
 export const getMarketIntraday = (symbol, interval = '30min', days = 7) =>
   api.get('/market/intraday', { params: { symbol, interval, days } })
@@ -152,6 +148,9 @@ export const getVix2Model = () => api.get('/vix2/model')
 export const trainVix2 = (params = {}) => api.post('/vix2/train', params)
 export const backfillVix2 = (days = 0, skip_existing = false) =>
   api.post('/vix2/backfill', { days, skip_existing })
+// 按时间顺序生成同日构造分的实验状态估计；不是未来收益预测
+export const backfillVix2Walkforward = (days = 0, block_size = 60, skip_existing = false, cv_gap = 5) =>
+  api.post('/vix2/backfill_walkforward', { days, block_size, skip_existing, cv_gap })
 
 // 舆情 v3 升级（2026-06-06）：时序因子 + 热门股池
 export const getSentimentIndicators = (code, days = 30) =>

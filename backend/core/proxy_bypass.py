@@ -38,8 +38,7 @@ requests/akshare 走 ``requests.sessions`` → 默认会读 Windows 注册表系
 
 不在范围
 --------
-- 不动 ``smtplib``：SMTP 是 TCP 直连，不受 Win 系统代理影响，但有专门的
-  ``SMTP_PROXY`` env 兜底（见 ``services/email_service.py``）。
+- 不动 ``smtplib``：SMTP 是 TCP 直连，不受 Win 系统代理影响。
 - 不动 Linux / Docker 部署。
 """
 

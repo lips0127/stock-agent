@@ -33,6 +33,11 @@ const routes = [
         component: () => import('../views/DividendIndexView.vue'),
       },
       {
+        path: 'watchlist',
+        name: 'Watchlist',
+        component: () => import('../views/WatchlistView.vue'),
+      },
+      {
         path: 'scan/:taskId',
         name: 'ScanProgress',
         component: () => import('../views/ScanProgressView.vue'),
@@ -46,17 +51,6 @@ const routes = [
         path: 'vix',
         name: 'Vix',
         component: () => import('../views/VixView.vue'),
-      },
-      // 知乎大V监控
-      {
-        path: 'zhihu',
-        name: 'ZhihuMonitor',
-        component: () => import('../views/ZhihuMonitorView.vue'),
-      },
-      {
-        path: 'zhihu/timeline',
-        name: 'ZhihuTimeline',
-        component: () => import('../views/ZhihuTimelineView.vue'),
       },
       // 系统
       {

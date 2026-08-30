@@ -72,7 +72,7 @@ const ttmLossHint = computed(() =>
   flex-wrap: wrap;
   gap: var(--space-5);
   padding: var(--space-3) var(--space-4);
-  background: var(--color-bg-glass);
+  background: var(--color-bg-elevated);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
 }
@@ -95,8 +95,8 @@ const ttmLossHint = computed(() =>
   font-size: var(--text-xs);
   color: var(--color-text-tertiary);
 }
-.valuation-value--cheap { color: var(--color-down, #059669); }
-.valuation-value--expensive { color: var(--color-up, #e11d48); }
+.valuation-value--cheap { color: var(--color-down); }
+.valuation-value--expensive { color: var(--color-up); }
 .valuation-value--muted {
   color: var(--color-text-tertiary);
   font-weight: var(--weight-regular);

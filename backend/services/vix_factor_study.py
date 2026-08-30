@@ -1,9 +1,8 @@
-"""VIX 因子事件研究（只读）：把恐慌/贪婪状态转成可验证的交易因子候选。
+"""VIX 探索性描述事件研究（只读）。
 
-不修改 vix_history，不参与每日 VIX 计算链。用于回答：
-  - 哪些 VIX/综合位置状态之后的 5/10/20/60 日收益更好？
-  - 极度恐慌是否真的具备反转价值？
-  - 贪婪区是否适合降仓？
+本模块比较不同历史状态后的 5/10/20/60 日样本表现，只用于描述和形成
+待独立验证的问题。结果存在重叠样本、事后筛选和交易成本缺失等局限，
+不得解释为交易信号、仓位建议或生产就绪结论。
 """
 
 from __future__ import annotations
@@ -23,6 +22,20 @@ _HORIZONS = (5, 10, 20, 60)
 _MIN_RULE_N = 30
 _CACHE_TTL = 1800.0
 _CACHE: dict[int, tuple[float, dict]] = {}
+
+
+def _study_metadata() -> dict:
+    return {
+        "study_type": "exploratory_descriptive_event_study",
+        "not_a_trading_signal": True,
+        "validation_status": "requires_independent_out_of_sample_validation",
+        "limitations": [
+            "不同观察日的前瞻收益区间可能重叠，样本并非相互独立。",
+            "情景与阈值可能受事后选择偏差影响。",
+            "统计未计交易成本、滑点、税费或可执行性约束。",
+            "结果仍需在未参与筛选的独立样本上验证。",
+        ],
+    }
 
 
 @dataclass(frozen=True)
@@ -101,12 +114,16 @@ def _metric_summary(df: pd.DataFrame, horizon: int) -> dict:
     }
 
 
-def _rule_pass(summary_20: dict, summary_60: dict, direction: str = "long") -> tuple[bool, list[str]]:
+def _threshold_check(
+    summary_20: dict,
+    summary_60: dict,
+    expectation: str = "positive_return_context",
+) -> tuple[bool, list[str]]:
     reasons = []
     n = int(summary_20.get("n") or 0)
     if n < _MIN_RULE_N:
         reasons.append(f"样本不足 {n}/{_MIN_RULE_N}")
-    if direction == "long":
+    if expectation == "positive_return_context":
         if (summary_20.get("avg_ret") or -999) <= 0:
             reasons.append("20日均值收益不为正")
         if (summary_60.get("avg_ret") or -999) <= 0:
@@ -126,26 +143,23 @@ def _rule_pass(summary_20: dict, summary_60: dict, direction: str = "long") -> t
 def _evaluate_rules(df: pd.DataFrame) -> list[dict]:
     rules = [
         {
-            "key": "panic_reversal",
-            "name": "极度恐慌反转候选",
-            "intent": "分批加仓候选",
-            "direction": "long",
+            "key": "extreme_fear_context",
+            "name": "极度恐慌历史情景",
+            "expectation": "positive_return_context",
             "mask": (df["bucket"] == "extreme_fear") & (df["spot_mom_5d"].fillna(0) >= -3),
             "logic": "综合百分位≤10，且5日动量未继续大幅恶化",
         },
         {
-            "key": "fear_accumulate",
-            "name": "恐慌区左侧布局候选",
-            "intent": "小仓位试探候选",
-            "direction": "long",
+            "key": "fear_context",
+            "name": "恐慌区历史情景",
+            "expectation": "positive_return_context",
             "mask": (df["bucket"] == "fear") & (df["spot_mom_20d"].fillna(-999) > -8),
             "logic": "综合百分位10-30，且20日动量没有极端破坏",
         },
         {
-            "key": "greed_reduce",
-            "name": "贪婪区降仓候选",
-            "intent": "止盈/降风险候选",
-            "direction": "short_risk",
+            "key": "elevated_percentile_context",
+            "name": "高分位历史情景",
+            "expectation": "negative_return_context",
             "mask": df["bucket"].isin(["greed", "extreme_greed"]) & (df["spot_ma60_dev"].fillna(0) > 0),
             "logic": "综合百分位≥70，且价格高于60日均线",
         },
@@ -154,15 +168,14 @@ def _evaluate_rules(df: pd.DataFrame) -> list[dict]:
     for r in rules:
         sub = df[r["mask"]].copy()
         horizons = {str(h): _metric_summary(sub, h) for h in _HORIZONS}
-        passed, reasons = _rule_pass(horizons["20"], horizons["60"], r["direction"])
+        passed, reasons = _threshold_check(horizons["20"], horizons["60"], r["expectation"])
         out.append({
             "key": r["key"],
             "name": r["name"],
-            "intent": r["intent"],
             "logic": r["logic"],
-            "passed": passed,
-            "verdict": "可进入回测" if passed else "仅观察，未达交易因子门槛",
-            "failed_reasons": reasons,
+            "threshold_met": passed,
+            "assessment": "达到预设描述性筛选阈值" if passed else "未达到预设描述性筛选阈值",
+            "threshold_notes": reasons,
             "metrics": horizons,
         })
     return out
@@ -210,8 +223,9 @@ def _build_dataset(days: int) -> pd.DataFrame:
 
 
 def _run_vix_factor_study_uncached(days: int = 365) -> dict:
-    """返回 VIX 因子事件研究结果。days 为最近 N 个交易样本。"""
+    """返回探索性描述事件研究；days 为最近 N 个交易样本。"""
     days = max(120, min(int(days or 365), 1200))
+    metadata = _study_metadata()
     df = _build_dataset(days)
     if df.empty:
         return {
@@ -222,6 +236,7 @@ def _run_vix_factor_study_uncached(days: int = 365) -> dict:
             "buckets": [],
             "rules": [],
             "current": None,
+            **metadata,
         }
 
     bucket_rows = []
@@ -237,10 +252,8 @@ def _run_vix_factor_study_uncached(days: int = 365) -> dict:
     rules = _evaluate_rules(df)
     current_row = df.iloc[-1]
     current_bucket = next((b for b in _BUCKETS if b.key == current_row["bucket"]), None)
-    best_long = None
-    candidates = [r for r in rules if r["intent"].startswith(("分批", "小仓位"))]
-    if candidates:
-        best_long = max(candidates, key=lambda r: r["metrics"]["20"].get("avg_ret") or -999)
+    observed = [r for r in rules if r["metrics"]["20"].get("avg_ret") is not None]
+    highest_observed = max(observed, key=lambda r: r["metrics"]["20"]["avg_ret"]) if observed else None
 
     return {
         "days": days,
@@ -256,17 +269,20 @@ def _run_vix_factor_study_uncached(days: int = 365) -> dict:
             "fear_greed": _safe_float(current_row.get("fear_greed")),
         },
         "summary": {
-            "best_long_rule": best_long["name"] if best_long else None,
-            "best_long_20d_avg": best_long["metrics"]["20"].get("avg_ret") if best_long else None,
-            "production_ready_rules": [r["name"] for r in rules if r["passed"]],
+            "highest_observed_avg_rule": highest_observed["name"] if highest_observed else None,
+            "highest_observed_20d_avg": (
+                highest_observed["metrics"]["20"].get("avg_ret") if highest_observed else None
+            ),
+            "threshold_met_rules": [r["name"] for r in rules if r["threshold_met"]],
         },
         "buckets": bucket_rows,
         "rules": rules,
+        **metadata,
     }
 
 
 def run_vix_factor_study(days: int = 365) -> dict:
-    """带短 TTL 缓存的只读事件研究入口，避免页面刷新反复拉指数全量历史。"""
+    """带短 TTL 缓存的只读描述事件研究，避免页面刷新反复拉历史数据。"""
     days = max(120, min(int(days or 365), 1200))
     now = time.time()
     cached = _CACHE.get(days)

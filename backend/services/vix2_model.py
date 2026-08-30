@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 _MODEL_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
 _LATEST_PTR = _MODEL_DIR / "vix2_latest.json"
+_WALKFORWARD_META_PATH = _MODEL_DIR / "vix2_walkforward_latest.json"
 
 DEFAULT_LABEL_PARAMS = {"pt": 0.05, "sl": 0.05, "horizon": 20, "rv_scale": True}
 _OOS_TAIL = 252          # 最近 N 个样本留作纯样本外评估
@@ -47,6 +48,7 @@ def train_model(
     feature_set: str = "core",
     c_grid: Optional[list] = None,
     n_splits: int = 5,
+    cv_gap: int = 5,
     save: bool = True,
     progress=None,
     features: Optional[pd.DataFrame] = None,
@@ -74,6 +76,18 @@ def train_model(
 
     label_params = {**DEFAULT_LABEL_PARAMS, **(label_params or {})}
     c_grid = c_grid or [0.01, 0.03, 0.1, 0.3, 1.0, 3.0]
+    label_horizon = label_params["horizon"]
+    if isinstance(label_horizon, bool) or not isinstance(label_horizon, (int, np.integer)):
+        raise ValueError("label horizon 必须是整数")
+    label_horizon = int(label_horizon)
+    if not 1 <= label_horizon <= 60:
+        raise ValueError("label horizon 必须在 1 到 60 个交易日之间")
+    if isinstance(cv_gap, bool) or not isinstance(cv_gap, (int, np.integer)):
+        raise ValueError("cv_gap 必须是整数")
+    requested_cv_gap = int(cv_gap)
+    if not 5 <= requested_cv_gap <= 60:
+        raise ValueError("cv_gap 必须在 5 到 60 个交易日之间")
+    effective_cv_gap = max(requested_cv_gap, label_horizon)
 
     if features is not None:
         feats = features
@@ -98,9 +112,17 @@ def train_model(
     n = len(ds)
     oos_tail = min(_OOS_TAIL, max(40, n // 5))
     split = n - oos_tail
-    X_tr, y_tr = X[:split], y[:split]
+    # Labels look forward by ``label_horizon`` observations. Purge the same
+    # effective embargo used by CV so no training label can inspect OOS prices.
+    train_end = split - effective_cv_gap
+    if train_end <= 0:
+        raise RuntimeError("有效样本不足以同时保留 OOS 与标签隔离区")
+    X_tr, y_tr = X[:train_end], y[:train_end]
     X_oos, y_oos = X[split:], y[split:]
-    _say(f"样本 {n}（训练 {split} / 纯样本外 {oos_tail}），正类占比 {y.mean():.3f}")
+    _say(
+        f"样本 {n}（训练 {train_end} / 隔离 {effective_cv_gap} / "
+        f"纯样本外 {oos_tail}），正类占比 {y.mean():.3f}"
+    )
 
     pipe = Pipeline([
         ("scaler", StandardScaler()),
@@ -109,11 +131,21 @@ def train_model(
             max_iter=2000, random_state=_RANDOM_SEED,
         )),
     ])
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    _say(f"TimeSeriesSplit({n_splits}) 网格搜索 C={c_grid}（ROC-AUC）…")
+    tscv = TimeSeriesSplit(n_splits=n_splits, gap=effective_cv_gap)
+    cv_splits = list(tscv.split(X_tr))
+    fold_audit = [{
+        "fold": fold_number,
+        "train_end_index": int(train_idx[-1]),
+        "test_start_index": int(test_idx[0]),
+        "gap_observations": int(test_idx[0] - train_idx[-1] - 1),
+    } for fold_number, (train_idx, test_idx) in enumerate(cv_splits, start=1)]
+    _say(
+        f"TimeSeriesSplit({n_splits}, requested_gap={requested_cv_gap}, "
+        f"effective_gap={effective_cv_gap}) 网格搜索 C={c_grid}（ROC-AUC）…"
+    )
     gs = GridSearchCV(
         pipe, {"clf__C": c_grid}, scoring="roc_auc",
-        cv=tscv, n_jobs=-1, refit=True,
+        cv=cv_splits, n_jobs=-1, refit=True,
     )
     gs.fit(X_tr, y_tr)
     best = gs.best_estimator_
@@ -148,12 +180,25 @@ def train_model(
     version = f"vix2-l2-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     meta = {
         "model_version": version,
+        "legacy_classifier": True,
+        "predictive_claim": False,
+        "validation_status": "legacy_no_robust_edge",
         "feature_set": feature_set,
         "features": CORE_FEATURES,
         "trained_at": datetime.now().isoformat(),
         "train_range": [dates[0], dates[-1]],
         "n_samples": n,
         "n_oos": int(oos_tail),
+        "n_train_for_oos": int(train_end),
+        "label_horizon": label_horizon,
+        "requested_cv_gap": requested_cv_gap,
+        "cv_gap": effective_cv_gap,
+        "cv_folds": fold_audit,
+        "oos_boundary": {
+            "train_end_index": int(train_end - 1),
+            "oos_start_index": int(split),
+            "gap_observations": int(split - train_end),
+        },
         "pos_rate": round(float(y.mean()), 4),
         "label_params": label_params,
         "best_C": best_c,
@@ -260,6 +305,7 @@ _TRUTH_LATEST_PTR = _MODEL_DIR / "vix2_truth_latest.json"
 def train_truth_model(
     alpha_grid: Optional[list] = None,
     n_splits: int = 5,
+    cv_gap: int = 5,
     save: bool = True,
     progress=None,
     features: Optional[pd.DataFrame] = None,
@@ -304,8 +350,10 @@ def train_truth_model(
     _say(f"样本 {n}（训练 {split} / 纯样本外 {oos_tail}），fear_truth 均值 {y.mean():.1f}")
 
     pipe = Pipeline([("scaler", StandardScaler()), ("reg", Ridge(random_state=_RANDOM_SEED))])
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    _say(f"TimeSeriesSplit({n_splits}) 网格搜索 alpha={alpha_grid}（R2）…")
+    if cv_gap < 5:
+        raise ValueError("cv_gap 必须至少为 5 个交易日")
+    tscv = TimeSeriesSplit(n_splits=n_splits, gap=cv_gap)
+    _say(f"TimeSeriesSplit({n_splits}, gap={cv_gap}) 网格搜索 alpha={alpha_grid}（R2）…")
     gs = GridSearchCV(pipe, {"reg__alpha": alpha_grid}, scoring="r2",
                       cv=tscv, n_jobs=-1, refit=True)
     gs.fit(X_tr, y_tr)
@@ -317,6 +365,8 @@ def train_truth_model(
     oos_pred = np.clip(best.predict(X_oos), 0, 100)
     oos_r2 = float(r2_score(y_oos, oos_pred))
     oos_mae = float(mean_absolute_error(y_oos, oos_pred))
+    baseline_oos = y[split - 1:n - 1]
+    baseline_oos_mae = float(mean_absolute_error(y_oos, baseline_oos))
     oos_rank_ic = float(pd.Series(y_oos).rank().corr(pd.Series(oos_pred).rank()))
     _say(f"纯样本外 R2={oos_r2:.4f} MAE={oos_mae:.2f} RankIC={oos_rank_ic:.4f}")
 
@@ -333,16 +383,27 @@ def train_truth_model(
     meta = {
         "model_version": version,
         "target": "fear_truth_regression",
+        "target_definition": "同日构造恐惧状态分（0-100），不是未来收益标签",
+        "target_horizon": "same_day",
+        "target_components": ["price_drawdown", "iv_surge", "iv_level_gate"],
+        "breadth_available": False,
+        "predictive_claim": False,
         "features": CORE_FEATURES,
         "trained_at": datetime.now().isoformat(),
         "train_range": [dates[0], dates[-1]],
         "n_samples": n,
         "n_oos": int(oos_tail),
+        "cv_gap": int(cv_gap),
         "y_mean": round(float(y.mean()), 2),
         "best_alpha": best_alpha,
         "cv_r2": round(cv_r2, 4),
         "oos_r2": round(oos_r2, 4),
         "oos_mae": round(oos_mae, 2),
+        "baseline_lag1_oos_mae": round(baseline_oos_mae, 2),
+        "validation_status": (
+            "state_fit_outperformed_baseline"
+            if oos_mae < baseline_oos_mae else "no_robust_edge"
+        ),
         "oos_rank_ic": round(oos_rank_ic, 4),
         "weights": weights,
         "intercept": round(float(reg.intercept_), 4),
@@ -394,3 +455,85 @@ def predict_truth_score(feature_row: dict, pipe=None, meta=None) -> Optional[dic
     pred = float(pipe.predict(x)[0])
     score = round(max(0.0, min(100.0, pred)), 2)
     return {"fear_truth_vix2": score, "model_version": meta.get("model_version")}
+
+
+# ─────────────────────────────────────────────────────────────────
+# Track B+: walk-forward OOS 训练器（2026-07-01）
+# ─────────────────────────────────────────────────────────────────
+
+def train_truth_at_cutoff(ds: pd.DataFrame, cutoff_idx: int,
+                          alpha_grid: Optional[list] = None,
+                          n_splits: int = 5, cv_gap: int = 5,
+                          min_train_samples: int = 200) -> Optional[dict]:
+    """用 ds 前 cutoff_idx 行训练 Ridge 同日状态拟合模型。
+
+    用于 walk-forward 回填：在推断日期 d 时，只用 d 之前的数据训练，保证历史曲线
+    是按时间顺序的实验状态估计（非 in-sample 回放）。构造标签是 trailing 派生，
+    cutoff 即「最后见到的训练日」= ds.iloc[cutoff_idx-1].date。
+
+    返回 {"pipe": pipeline, "train_cutoff": str, "alpha": float} 或 None（样本不足）。
+    """
+    from sklearn.linear_model import Ridge
+    from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    if min_train_samples < 40:
+        raise ValueError("min_train_samples 必须至少为 40")
+    if cv_gap < 5:
+        raise ValueError("cv_gap 必须至少为 5 个交易日")
+    if not 2 <= n_splits <= 10:
+        raise ValueError("n_splits 必须在 2 到 10 之间")
+    if cutoff_idx < min_train_samples:
+        return None
+    if cutoff_idx > len(ds):
+        raise ValueError("cutoff_idx 超出数据集范围")
+    alpha_grid = alpha_grid or [0.1, 1.0, 3.0, 10.0, 30.0, 100.0]
+    sub = ds.iloc[:cutoff_idx].sort_values("date").reset_index(drop=True)
+    X = sub[CORE_FEATURES].to_numpy(dtype=float)
+    y = sub["fear_truth"].to_numpy(dtype=float)
+    if len(sub) < min_train_samples or len(np.unique(y)) < 2:
+        return None
+
+    pipe = Pipeline([("scaler", StandardScaler()), ("reg", Ridge(random_state=_RANDOM_SEED))])
+    n_cv = min(n_splits, max(2, len(sub) // 60))
+    tscv = TimeSeriesSplit(n_splits=n_cv, gap=cv_gap)
+    fold_audit = []
+    for train_idx, test_idx in tscv.split(X):
+        fold_audit.append({
+            "train_end": str(sub.iloc[int(train_idx[-1])]["date"]),
+            "test_start": str(sub.iloc[int(test_idx[0])]["date"]),
+            "gap_observations": int(test_idx[0] - train_idx[-1] - 1),
+        })
+    gs = GridSearchCV(pipe, {"reg__alpha": alpha_grid},
+                      scoring="neg_mean_absolute_error",
+                      cv=tscv, n_jobs=1, refit=True)
+    gs.fit(X, y)
+    best = gs.best_estimator_
+    return {
+        "pipe": best,
+        "train_cutoff": str(sub.iloc[-1]["date"]),
+        "alpha": float(gs.best_params_["reg__alpha"]),
+        "n_train": int(len(sub)),
+        "cv_gap": int(cv_gap),
+        "cv_folds": fold_audit,
+    }
+
+
+def save_walkforward_meta(meta: dict) -> None:
+    """持久化最近一次时间顺序状态估计的审计摘要。"""
+    _ensure_dir()
+    tmp = _WALKFORWARD_META_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(_WALKFORWARD_META_PATH)
+
+
+def get_walkforward_meta() -> Optional[dict]:
+    """读取最近一次时间顺序状态估计审计摘要。"""
+    if not _WALKFORWARD_META_PATH.exists():
+        return None
+    try:
+        return json.loads(_WALKFORWARD_META_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        logger.warning("VIX2 walk-forward 审计摘要不可读", exc_info=True)
+        return None
