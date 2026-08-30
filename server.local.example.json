@@ -1,0 +1,7 @@
+{
+  "host": "CHANGE_ME_SERVER_IP",
+  "user": "ubuntu",
+  "port": 22,
+  "key": "tencent_key",
+  "app_dir": "/opt/stock-agent"
+}

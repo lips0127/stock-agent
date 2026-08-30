@@ -64,6 +64,22 @@ sudo docker compose exec app python -m backend.security_check
 
 浏览器打开 `http://<服务器IP>` → 登录页使用 `.env` 中配置的管理员账号。
 
+### 4.1 远程一键部署工具（2026-08-30）
+
+日常部署与运维不必手动逐条执行：仓库自带 `scripts/server_ops.py`，连接信息读 `server.local.json`（已 gitignore，模板见 `server.local.example.json`，真实 IP/私钥路径绝不入库）：
+
+```bash
+python scripts/server_ops.py status   # 容器/磁盘/健康状态
+python scripts/server_ops.py deploy   # git archive HEAD → scp 上传 → compose up -d --build → 健康检查
+python scripts/server_ops.py logs 200 # 应用日志
+python scripts/server_ops.py health   # 服务器本机 + 外网两级 /health 检查
+python scripts/server_ops.py backup   # app-data 卷打包到服务器 ~/backups/
+python scripts/server_ops.py exec "sudo docker ps"
+```
+
+代码传输走 `git archive`（只含跟踪文件），服务器无需 GitHub 凭证；`.env` 与 `app-data` 卷不在包内，重复执行安全。首次初始化（装 Docker/compose 插件、生成 `.env`）仍按本文第 2-3 节手动执行一次。
+
+
 ## 5. 日常运维
 
 ```bash

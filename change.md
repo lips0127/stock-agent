@@ -27,6 +27,10 @@
 **现场治理**：
 - 删除根目录 QA 截图（`*.png`）、`vr-test.js`、`scripts/debug_zhihu_pins.py`、旧日志与 ACL 损坏的 `.pytest_cache/`（已加入 `.gitignore`）。
 
+**远程部署工具（补充）**：
+- 新增 `scripts/server_ops.py`：腾讯云单容器一键部署与运维（status/deploy/logs/health/backup/exec）。连接信息读 `server.local.json`（gitignore），仓库只进占位符模板 `server.local.example.json`，真实 IP 与私钥路径绝不入库。代码传输走 `git archive`（服务器无需 GitHub 凭证）；构建改为服务器端 nohup 后台执行 + 轮询 `deploy.log`。
+- `backend/Dockerfile` 三个构建阶段接入腾讯云镜像源（apt/pip/npm）——国内服务器直连官方源曾导致构建 30 分钟无法完成。
+
 ## 2026-07-01
 
 ### 十倍股/财报异动扫描器 — Step 0~2（feature/tenbag-scanner）

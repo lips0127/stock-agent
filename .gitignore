@@ -1,4 +1,6 @@
 .env
+server.local.json
+doc/
 *.db
 tencent_key
 __pycache__/
