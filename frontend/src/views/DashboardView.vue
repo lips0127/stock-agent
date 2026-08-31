@@ -9,8 +9,20 @@
       <template #meta>
         <span class="meta-item">
           <span class="meta-dot" :class="{ 'meta-dot--ok': !anyLoading }" />
-          数据已同步 {{ lastSyncLabel }}
+          数据更新于 {{ lastSyncLabel }}
         </span>
+        <el-tooltip content="重新拉取指数、高股息榜单与任务日志，不影响后台任务" placement="bottom">
+          <el-button
+            class="meta-refresh"
+            text
+            size="small"
+            :icon="RefreshRight"
+            :loading="anyLoading"
+            @click="refreshAll"
+          >
+            刷新
+          </el-button>
+        </el-tooltip>
         <span class="meta-divider" />
         <span class="meta-item">
           <el-icon class="meta-icon"><Clock /></el-icon>
@@ -22,12 +34,20 @@
         </span>
       </template>
       <template #actions>
-        <el-button :icon="RefreshRight" @click="refreshAll" :loading="anyLoading">
-          刷新数据
-        </el-button>
-        <el-button type="primary" :icon="Search" @click="handleFullRefresh" :loading="fullRefreshing">
-          全市场扫描
-        </el-button>
+        <el-tooltip
+          content="后台异步任务：扫描全部 A 股并更新高股息榜单，耗时较长；开始后可通过页面底部进度条查看实时进度"
+          placement="bottom-end"
+        >
+          <el-button
+            type="primary"
+            :icon="Histogram"
+            :loading="fullRefreshing"
+            :disabled="scanRunning"
+            @click="handleFullRefresh"
+          >
+            {{ scanRunning ? '扫描进行中…' : '启动全市场扫描' }}
+          </el-button>
+        </el-tooltip>
       </template>
     </PageHeader>
 
@@ -209,8 +229,8 @@ import {
 } from '../api'
 import { ElMessage } from 'element-plus'
 import {
-  Refresh, Search, RefreshRight, ArrowRight, Clock,
-  WarningFilled,
+  Refresh, RefreshRight, ArrowRight, Clock,
+  WarningFilled, Histogram,
 } from '@element-plus/icons-vue'
 
 import PageHeader from '../components/ui/PageHeader.vue'
@@ -241,6 +261,7 @@ const refreshing = ref(false)
 const fullRefreshing = ref(false)
 
 const now = ref(new Date())
+const lastFetchedAt = ref(null)
 let clockTimer = null
 
 const vix = ref(null)
@@ -250,6 +271,9 @@ let vixPollTimer = null
 
 const anyLoading = computed(
   () => indicesLoading.value || stocksLoading.value || logsLoading.value
+)
+const scanRunning = computed(
+  () => taskStore.currentTask?.status === 'running'
 )
 const runningTaskCount = computed(
   () => logs.value.filter((l) => l.status === 'running').length
@@ -266,7 +290,8 @@ const greeting = computed(() => {
 })
 
 const lastSyncLabel = computed(() => {
-  const d = now.value
+  if (!lastFetchedAt.value) return '—'
+  const d = lastFetchedAt.value
   const pad = (n) => String(n).padStart(2, '0')
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 })
@@ -378,8 +403,9 @@ async function fetchLogs() {
     logsLoading.value = false
   }
 }
-function refreshAll() {
-  fetchIndices(); fetchStocks(); fetchLogs()
+async function refreshAll() {
+  await Promise.allSettled([fetchIndices(), fetchStocks(), fetchLogs()])
+  lastFetchedAt.value = new Date()
 }
 function openStockSearch(symbol) {
   if (typeof symbol === 'object' && symbol !== null) symbol = symbol.code || ''
@@ -430,7 +456,7 @@ watch(
 )
 
 onMounted(() => {
-  fetchIndices(); fetchStocks(); fetchLogs()
+  refreshAll()
   fetchVix(); fetchVixHistory()
   clockTimer = setInterval(() => { now.value = new Date() }, 1000)
 })
@@ -464,6 +490,15 @@ onUnmounted(() => {
 .meta-icon {
   font-size: 12px;
   color: var(--color-text-tertiary);
+}
+
+/* meta 行内的刷新按钮：压成与 meta 文本同级的小控件 */
+.meta-refresh {
+  height: 22px;
+  padding: 0 6px;
+  font-size: var(--text-xs);
+  --el-button-text-color: var(--color-text-tertiary);
+  --el-button-hover-text-color: var(--color-text-primary);
 }
 
 /* 数据同步状态点：语义状态指示（非装饰），静态不脉冲 */

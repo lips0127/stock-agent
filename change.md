@@ -1,6 +1,26 @@
 # Change Log
 
+## 2026-09-01
+
+### 修复 batch_analyze 显式 codes 路径 UnboundLocalError + guba 反爬墙解锁（服务器实战）
+
+**批量分析失败连环排查**：用户新增 4 只监控股后批量分析 4/5 失败（"无可用帖子"），单独补跑 600036 又两次崩溃。
+
+1. **guba 全站反爬壳锁服务器 IP**：晚上连续批量触发速率型验证码墙，列表/详情页全部返回引导壳，新股票（无 DB 缓存）必然"无可用帖子"。处理：`tools/guba_cookie_harvest.py` Linux 化（浏览器路径自动选择 + `GUBA_HARVEST_EXECUTABLE` 覆盖，commit dc62bc8），在服务器宿主机用 playwright chromium 采集 19 条新鲜 cookie 写入数据卷，容器 60s 探测窗口热加载，实测列表页恢复取数、stale 自愈复位。
+2. **batch_analyze 显式 codes 路径 UnboundLocalError**：`code_to_name` 只在 `codes=None` 分支绑定，显式传 codes（单只补跑/重试）时进度路径引用未绑定变量，整批崩溃。修复为无条件初始化 + 显式 codes 时从 sentiment_config 补查名称（仅用于进度展示）；codes 顺手 zfill 归一。回归测试 `tests/test_sentiment_batch.py` 2 用例。
+3. **运维教训**：长任务挂在 ssh 会话上的 `docker exec` 前台进程会随会话中断被杀（本次 600036 第一次补跑因此死亡）；改用 `docker exec -d` + 容器内日志文件落地。
+
+门禁：pytest 165 passed + 19 subtests。
+
 ## 2026-08-31
+
+### 生产环境打通 LLM 分析（MiniMax）
+
+代码本就支持三供应商（`sentiment_service.py` 按 DEEPSEEK > MINIMAX > VOLCANO 优先级读环境变量，MiniMax 走 `MiniMax-M3`），但生产不可用：① compose env 白名单没有透传 key；② 服务器 `.env` 初始化时只写了安全凭证。
+
+- `docker-compose.yml` 增加可选透传 `DEEPSEEK_API_KEY` / `MINIMAX_API_KEY` / `VOLCANO_API_KEY`（空默认，不强制）；`.env.production.example`、`DEPLOY.md` 同步说明。
+- 服务器 `.env` 追加 `MINIMAX_API_KEY`（从本地 `.env` 经 ssh 管道传输，全程未回显；本地与服务器该文件均 gitignore）。
+- 生效范围：股吧舆情 LLM 分析（页面手动分析 + `daily_sentiment` 调度任务）、财报解析（`report_parser` 复用同一客户端）。
 
 ### 修复调度器 cron 任务「出生即暂停、永不触发」（生产事故，服务器部署验证）
 

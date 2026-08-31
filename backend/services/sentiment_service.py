@@ -944,6 +944,10 @@ def batch_analyze(codes: list[str] = None, forum_type: str = "eastmoney",
         logger.warning("已有批量分析任务在进行中（同进程）")
         return []
     try:
+        # code_to_name 只用于进度展示，必须无条件绑定：显式传入 codes 的调用
+        # （单只补跑/重试）原先不经过 DB 分支，进度路径引用未绑定变量直接
+        # UnboundLocalError，整批崩溃且任务记失败（2026-09-01 生产 bug）。
+        code_to_name: dict[str, str] = {}
         if codes is None:
             with get_connection() as conn:
                 cur = conn.cursor()
@@ -955,6 +959,21 @@ def batch_analyze(codes: list[str] = None, forum_type: str = "eastmoney",
                 rows = cur.fetchall()
                 codes = [r["stock_code"] for r in rows]
                 code_to_name = {r["stock_code"]: (r["stock_name"] or "") for r in rows}
+        else:
+            codes = [str(c).strip().zfill(6) for c in codes]
+            try:
+                with get_connection() as conn:
+                    cur = conn.cursor()
+                    marks = ",".join("?" for _ in codes)
+                    cur.execute(
+                        f"""SELECT stock_code, stock_name FROM sentiment_config
+                           WHERE stock_code IN ({marks})""",
+                        tuple(codes),
+                    )
+                    code_to_name = {r["stock_code"]: (r["stock_name"] or "")
+                                    for r in cur.fetchall()}
+            except Exception:
+                logger.warning("批量分析补查股票名称失败（仅影响进度显示，不影响分析）")
 
         # 进度镜像（本地，跨进程通过 task_runs.result_json 暴露）
         prog = {
