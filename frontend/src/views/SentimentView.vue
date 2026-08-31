@@ -94,7 +94,7 @@
           <span class="alert-dot" /> {{ circuitBadge.text }}（点击重置）
         </div>
         <div v-if="cookieStale" class="alert-chip alert-chip--stale">
-          帖子正文抓取临时降级：guba 触发速率型反爬，冷却后将自动恢复（列表页标题不受影响）
+          帖子正文抓取临时降级：guba 触发速率型反爬，冷却后自动恢复；可运行 tools/guba_cookie_harvest.py 采集新 cookie 快速解锁（约 1 分钟生效，无需重启）
         </div>
       </div>
     </ModernCard>

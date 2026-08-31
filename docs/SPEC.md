@@ -79,7 +79,7 @@
 
 缓存可用于提升可用性，但页面必须显示缓存时点，且不得把缓存数据标为实时。
 
-东方财富股吧（guba）详情页存在速率型反爬（2026-08-31 实测定性，与登录态/cookie 无关）：持续高速抓取后返回约 2.8KB 的「身份核实」引导壳，停流冷却后自动解除。抓取层的对应约束为详情页全局节流、引导壳退避重试与周期探测自愈；正文补抓限时间窗口和单轮数量上限，避免积压全量补抓把源打挂。正文缺失属 degraded 而非故障关闭，帖子列表/标题不受影响。
+东方财富股吧（guba）详情页存在速率型反爬（2026-08-31 实测定性）：持续高速抓取后返回约 2.8KB 的「身份核实」引导壳（静默 JS 挑战页），列表页与详情页同受影响。自然冷却需数小时；真实浏览器访问一次即自动通过挑战并种下「已验证」访客 cookie，脚本携带该新鲜 cookie 可立即恢复（`tools/guba_cookie_harvest.py` 采集到 `$CACHE_DIR/guba_cookies.json`，服务侧 mtime 热加载，约 1 分钟生效，无需重启；cookie 属反爬凭证，禁止提交 Git 或写入日志）。抓取层的对应约束为详情页全局节流、引导壳退避重试与周期探测自愈；正文补抓限时间窗口和单轮数量上限，避免积压全量补抓把源打挂。正文缺失属 degraded 而非故障关闭，帖子列表/标题在列表页未被墙时不受影响。
 
 ### 3.4 页面数据状态
 
@@ -301,7 +301,7 @@ Gunicorn 多 worker 会各自初始化 APScheduler，可能导致同一任务重
 | 个股 | `GET /api/stock/<symbol>`、`/api/stock/<symbol>/dashboard` | 组合结果中每个子域可独立失败并显式标记。 |
 | 扫描与任务 | `POST /api/index_scan`、`/api/full_refresh`、`GET/POST /api/tasks/*` | 创建异步任务后使用统一 `task_id` 查询。 |
 | 调度 | `GET/PATCH/POST /api/scheduler/configs/*` | 修改配置必须记录操作者和生效结果。 |
-| 舆情 | `/api/sentiment/*` | 原帖、分析、审计、指标和候选结果须区分来源与生成时间。guba 详情页受速率型反爬约束：抓取层带全局节流、引导壳退避重试与周期探测自愈（2026-08-31 起，与登录态/cookie 无关）；`/api/sentiment/circuit_status` 的 `cookie_stale` 字段语义为「反爬降级中，冷却后自动恢复」，正文缺失时帖子标题仍可用。 |
+| 舆情 | `/api/sentiment/*` | 原帖、分析、审计、指标和候选结果须区分来源与生成时间。guba 详情页受速率型反爬约束：抓取层带全局节流、引导壳退避重试与周期探测自愈（2026-08-31 起）；`/api/sentiment/circuit_status` 的 `cookie_stale` 字段语义为「反爬降级中」，恢复走自然冷却或热加载采集 cookie（`tools/guba_cookie_harvest.py`），正文缺失时帖子标题仍可用。 |
 | 风险观察 | `/api/vix/*`、`/api/vix2/*` | VIX2 全程标注实验和验证状态。 |
 | 财报 | `POST /api/financial/parse`、`/api/financial/analyze` | 解析结果是研究辅助，保留来源文本/报告期说明。 |
 | 自选股 | `GET/POST /api/watchlist`、`PATCH/DELETE /api/watchlist/<code>` | 报价聚合必须区分成功/失败子项并携带 as-of；仅研究浏览，不构成交易信号。 |

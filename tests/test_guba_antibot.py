@@ -200,5 +200,61 @@ class GubaThrottleTests(unittest.TestCase):
             self.assertGreaterEqual(b - a, 0.15)
 
 
+class GubaCookieFileTests(unittest.TestCase):
+    """采集 cookie 文件热加载（tools/guba_cookie_harvest.py 的服务侧）。"""
+
+    def setUp(self):
+        fs._COOKIE_STALE = False
+        self._orig_mtime = fs._cookie_file_mtime[0]
+        self._orig_file = fs._COOKIE_FILE
+
+    def tearDown(self):
+        fs._cookie_file_mtime[0] = self._orig_mtime
+        fs._COOKIE_FILE = self._orig_file
+        fs._inject_bootstrap_cookies.__globals__["_cookie_file_mtime"][0] = self._orig_mtime
+
+    def test_load_cookie_file_playwright_format(self):
+        """playwright list 格式加载并热换新 jar。"""
+        import json as _json
+        import tempfile
+        import os
+
+        payload = [
+            {"name": "qgqp_b_id", "value": "fresh1", "domain": ".eastmoney.com"},
+            {"name": "new_token", "value": "v2", "domain": ".eastmoney.com"},
+        ]
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+            _json.dump(payload, f)
+            path = f.name
+        try:
+            fs._COOKIE_FILE = __import__("pathlib").Path(path)
+            fs._cookie_file_mtime[0] = None
+            # 触发注入：文件存在 -> 清 jar 换新
+            jar = {}
+            real_set = fs._GUBA_SESSION.cookies.set
+            real_clear = fs._GUBA_SESSION.cookies.clear
+            real_keys = fs._GUBA_SESSION.cookies.keys
+            fs._GUBA_SESSION.cookies.set = lambda k, v, domain=None: jar.__setitem__(k, v)
+            fs._GUBA_SESSION.cookies.clear = lambda: jar.clear()
+            fs._GUBA_SESSION.cookies.keys = lambda: list(jar)
+            try:
+                fs._inject_bootstrap_cookies()
+            finally:
+                fs._GUBA_SESSION.cookies.set = real_set
+                fs._GUBA_SESSION.cookies.clear = real_clear
+                fs._GUBA_SESSION.cookies.keys = real_keys
+            self.assertEqual(jar, {"qgqp_b_id": "fresh1", "new_token": "v2"})
+            # mtime 未变时不再重读（返回 None 路径）
+            self.assertEqual(fs._load_cookie_file(), None)
+        finally:
+            os.unlink(path)
+
+    def test_load_cookie_file_missing_returns_none(self):
+        import pathlib
+        fs._COOKIE_FILE = pathlib.Path("Z:/nonexistent/guba_cookies.json")
+        fs._cookie_file_mtime[0] = None
+        self.assertIsNone(fs._load_cookie_file())
+
+
 if __name__ == "__main__":
     unittest.main()

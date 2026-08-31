@@ -36,3 +36,6 @@ vr-test.js
 # 生成的 ML 模型与运行时数据（训练产物，运行时自动生成）
 data/models/
 data/research/
+
+# guba 已验证访客 cookie（运行时采集，禁止入库）
+guba_cookies.json

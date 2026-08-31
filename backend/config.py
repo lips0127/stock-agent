@@ -105,9 +105,11 @@ GUBA_HTTP_RETRIES = _env("GUBA_HTTP_RETRIES", "1", int)
 GUBA_HTTP_RETRY_BACKOFF = _env("GUBA_HTTP_RETRY_BACKOFF", "0.5", float)
 GUBA_AUDIT_MAX_WORKERS = _env("GUBA_AUDIT_MAX_WORKERS", "4", int)
 GUBA_PREFETCH_INTERVAL_HOURS = _env("GUBA_PREFETCH_INTERVAL_HOURS", "2", int)
-# v9 2026-08-31：guba 引导壳为速率型间歇反爬（与 cookie 无关），详情页全局节流 +
-# 单次正文补抓上限（旧实现补抓 DB 全量无正文帖子，单股数千条必然触发反爬）。
-GUBA_DETAIL_MIN_INTERVAL = _env("GUBA_DETAIL_MIN_INTERVAL", "0.8", float)
+# v9 2026-08-31：guba 引导壳为速率型反爬（机制详见 forum_service 头注释）。
+# 实测有效 cookie 也不能豁免限流：0.8s/请求连续 150+ 个会再次触发，默认
+# 1.5s 保守起步；正文补抓限 days 窗口 + 每轮上限（旧实现补抓 DB 全量无正文
+# 帖子，单股数千条必然触发反爬）。
+GUBA_DETAIL_MIN_INTERVAL = _env("GUBA_DETAIL_MIN_INTERVAL", "1.5", float)
 GUBA_BACKFILL_MAX_PER_RUN = _env("GUBA_BACKFILL_MAX_PER_RUN", "150", int)
 
 # ── 全市场舆情观测台（v4, 2026-06-06）──

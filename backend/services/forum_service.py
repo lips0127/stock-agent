@@ -10,12 +10,13 @@ import logging
 import threading
 import requests
 from datetime import datetime, timedelta
+from pathlib import Path
 from backend.core.database import get_connection, get_sentiment_filters
 from backend.services.stock_service import _no_proxy
 from backend.config import (
     GUBA_CB_FAILURE_THRESHOLD, GUBA_CB_COOLDOWN_SECONDS,
     GUBA_HTTP_RETRIES, GUBA_HTTP_RETRY_BACKOFF,
-    GUBA_DETAIL_MIN_INTERVAL, GUBA_BACKFILL_MAX_PER_RUN,
+    GUBA_DETAIL_MIN_INTERVAL, GUBA_BACKFILL_MAX_PER_RUN, CACHE_DIR,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,12 +32,25 @@ _DEFAULT_FILTER_KEYWORDS = ["转发", "阅读", "股吧", "收藏", "发表于"]
 # 列表页（list,X.html）不受影响。
 #
 # v9 2026-08-31 复盘修正（关键事实变化）：
-# 实测 guba 的 cookie 墙已整体放开--不携带任何 cookie 的全新 Session 也能拿到
-# 详情页正文；带 2026-06-06 的旧 cookie 同样正常。引导壳真正的触发条件是
-# **速率型反爬（验证码墙）**：持续高速抓取（如补抓积压正文、多线程审计/批量
-# 并发）后触发；触发后封锁窗口较长（实测 >40 分钟完全静默仍未解除），
-# 期间列表页与详情页均返回壳。cookie 注入/预热无法解决，也未观察到
-# UA 维度豁免。核心对策是从源头控速，避免触发。
+# 引导壳（约 2.8KB「身份核实」页）的真实机制是**速率型反爬 + 静默 JS 挑战**：
+# - 触发：持续高速抓取（补抓积压正文、多线程审计/批量并发）后，列表页与
+#   详情页均开始返回壳（原注释「列表页不受影响」已过时）；
+# - 恢复有两条路：自然冷却（实测 >45 分钟未解除，需数小时）；
+#   或携带「已通过挑战」的新鲜访客 cookie 立即恢复（真实浏览器访问一次
+#   即自动过挑战，headless 采集见 tools/guba_cookie_harvest.py）。
+#   2026-06-06 硬编码的旧 cookie 就是当年采集的验证凭证，数月后失效即
+#   「session 过期」现象——过期 cookie 注入无济于事，新鲜 cookie 立竿见影。
+#
+# v9 策略（详见 _http_get_with_retry）：
+# 1. cookie 来源分两层：$CACHE_DIR/guba_cookies.json（采集工具产出，mtime
+#    变化即热更新，stale 探测时自动换新，无需重启）> 硬编码遗留组（兜底）
+# 2. 详情页全局节流（_throttle_detail_request，GUBA_DETAIL_MIN_INTERVAL），
+#    所有线程（补抓/审计/批量）共享同一最小间隔，从源头避免触发反爬
+# 3. 引导壳退避重试（3s / 9s）；重试仍壳则置 _COOKIE_STALE 告警，
+#    周期探测换新 cookie / 等冷却，自动复位（自愈，无需人工干预）
+# 4. fetch_forum_posts 的正文补抓限定 days 窗口 + GUBA_BACKFILL_MAX_PER_RUN
+#    上限；旧实现会补抓该股 DB 中全部无正文帖子（单股数千条，见 2026-08-31
+#    积压 12.7 万条），数小时连续抓取必然触发反爬并长期降级
 #
 # v9 策略（详见 _http_get_with_retry）：
 # 1. 保留 bootstrap cookie 注入（遗留兼容，无害；guba 已不校验）
@@ -64,6 +78,12 @@ _GUBA_BOOTSTRAP_COOKIES = {
     "st_asi": "delete",
 }
 
+# v9.1：已验证 cookie 文件（tools/guba_cookie_harvest.py 产出；Docker 中位于
+# /data 卷，容器重建不丢）。内容为浏览器过完「身份核实」挑战后的新鲜访客
+# cookie，属反爬凭证而非用户身份，禁止提交 Git 或写入日志。
+_COOKIE_FILE = Path(CACHE_DIR) / "guba_cookies.json"
+_cookie_file_mtime = [None]
+
 _GUBA_SESSION = requests.Session()
 _GUBA_SESSION.headers.update({
     "User-Agent": (
@@ -83,8 +103,56 @@ _GUBA_SESSION.headers.update({
 })
 
 
+def _load_cookie_file() -> dict | None:
+    """读取 $CACHE_DIR/guba_cookies.json；mtime 未变时返回 None（免重复注入）。
+
+    支持两种格式：playwright 采集的 [{name, value, domain}, ...]
+    （tools/guba_cookie_harvest.py 产出）或 {name: value} 简表。
+    """
+    try:
+        mtime = _COOKIE_FILE.stat().st_mtime
+    except OSError:
+        _cookie_file_mtime[0] = None
+        return None
+    if _cookie_file_mtime[0] == mtime:
+        return None
+    try:
+        data = json.loads(_COOKIE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        logger.warning(f"[guba] cookie 文件解析失败（忽略）: {e}")
+        return None
+    _cookie_file_mtime[0] = mtime
+    cookies: dict[str, str] = {}
+    if isinstance(data, list):
+        for c in data:
+            if isinstance(c, dict) and c.get("name") and c.get("value"):
+                cookies[str(c["name"])] = str(c["value"])
+    elif isinstance(data, dict):
+        cookies = {str(k): str(v) for k, v in data.items()}
+    return cookies or None
+
+
 def _inject_bootstrap_cookies() -> None:
-    """把 _GUBA_BOOTSTRAP_COOKIES 注入到 _GUBA_SESSION。"""
+    """把 cookie 注入到 _GUBA_SESSION。
+
+    优先级：guba_cookies.json（新鲜采集的已验证 cookie）> 硬编码遗留组。
+    文件存在时先清空 jar 再注入，避免旧值残留；文件 mtime 变化即热更新
+    （stale 探测窗口会调用本函数，采集后约 1 分钟内自动生效，无需重启）。
+    """
+    file_cookies = _load_cookie_file()
+    if file_cookies is None and _cookie_file_mtime[0] is not None:
+        # 文件存在但未变化：只补充注入 jar 中缺失的项，不打扰已有会话状态
+        missing = {k: v for k, v in _GUBA_BOOTSTRAP_COOKIES.items()
+                   if k not in _GUBA_SESSION.cookies.keys()}
+        for k, v in missing.items():
+            _GUBA_SESSION.cookies.set(k, v, domain=".eastmoney.com")
+        return
+    if file_cookies:
+        _GUBA_SESSION.cookies.clear()
+        for k, v in file_cookies.items():
+            _GUBA_SESSION.cookies.set(k, v, domain=".eastmoney.com")
+        logger.info(f"[guba] 已加载 {len(file_cookies)} 条采集 cookie（{_COOKIE_FILE.name}）")
+        return
     for k, v in _GUBA_BOOTSTRAP_COOKIES.items():
         _GUBA_SESSION.cookies.set(k, v, domain=".eastmoney.com")
 
@@ -95,9 +163,9 @@ _inject_bootstrap_cookies()
 _GUBA_WARMED_UP = True  # 遗留标记（v9 起不再参与重试决策，仅保留兼容）
 _GUBA_WARMUP_LOCK = threading.Lock()
 # 反爬降级标志（v9 2026-08-31 语义变更）：详情页退避重试后仍返回引导壳时置 True，
-# 由 /api/sentiment/circuit_status 透出给前端告警。引导壳是速率型反爬（封锁窗
-# 口可达数十分钟），期间抓取层降级为 DB 缓存；周期探测在墙解除后自动复位，
-# 无需人工换 cookie 或重启。
+# 由 /api/sentiment/circuit_status 透出给前端告警。恢复通道：自然冷却（数小时）
+# 或热加载采集 cookie（tools/guba_cookie_harvest.py，约 1 分钟内生效）；
+# 成功的详情页请求会自动复位，无需重启。
 _COOKIE_STALE = False
 # 引导壳告警节流（v8 2026-06-30）：cookie 过期后，每个详情页请求都会返回引导壳。
 # 旧逻辑每次都做无意义 warmup + 打 2 行日志 -> 1000+ 只股票刷屏。改为：
@@ -138,14 +206,15 @@ def _throttle_detail_request(url: str) -> None:
 
 
 def _warmup_guba_session() -> bool:
-    """重新注入 bootstrap cookies（遗留接口，v9 起仅作兼容保留）。
+    """重新注入 cookie（兼容接口；v9.1 起同时热检查采集 cookie 文件）。
 
-    v9 实测：guba 已不校验这些 cookie（空 cookie 也能取正文），warmup 对
-    引导壳无恢复作用；universe_service._prewarm_guba 仍调用本函数，保留
-    注入行为以维持既有导入契约。
+    universe_service._prewarm_guba 仍调用本函数。行为：
+    - guba_cookies.json mtime 变化 → 清 jar 换新注入（快速解锁通道）
+    - 文件未变化/不存在 → 维持既有 jar，补齐硬编码遗留组缺失项
+    对引导壳本身无主动恢复作用（壳要靠退避重试/探测/换新 cookie）。
 
     Returns:
-        True 注入成功（不保证详情页可用）；
+        True 注入成功；
         False 注入失败。
     """
     global _GUBA_WARMED_UP
@@ -336,6 +405,9 @@ def _http_get_with_retry(url: str, headers: dict, timeout: int,
                     return r
                 with _GUBA_WARMUP_LOCK:
                     _last_shell_probe_ts = now
+                    # 探测前热检查采集 cookie 文件：mtime 变化即换新注入，
+                    # 运维跑完 tools/guba_cookie_harvest.py 后无需重启
+                    _inject_bootstrap_cookies()
             # 退避重试：给反爬冷却窗口（独立预算，不挤占网络重试）
             if shell_retry_idx < len(_SHELL_BACKOFFS):
                 sleep_s = _SHELL_BACKOFFS[shell_retry_idx]
