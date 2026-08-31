@@ -105,6 +105,10 @@ GUBA_HTTP_RETRIES = _env("GUBA_HTTP_RETRIES", "1", int)
 GUBA_HTTP_RETRY_BACKOFF = _env("GUBA_HTTP_RETRY_BACKOFF", "0.5", float)
 GUBA_AUDIT_MAX_WORKERS = _env("GUBA_AUDIT_MAX_WORKERS", "4", int)
 GUBA_PREFETCH_INTERVAL_HOURS = _env("GUBA_PREFETCH_INTERVAL_HOURS", "2", int)
+# v9 2026-08-31：guba 引导壳为速率型间歇反爬（与 cookie 无关），详情页全局节流 +
+# 单次正文补抓上限（旧实现补抓 DB 全量无正文帖子，单股数千条必然触发反爬）。
+GUBA_DETAIL_MIN_INTERVAL = _env("GUBA_DETAIL_MIN_INTERVAL", "0.8", float)
+GUBA_BACKFILL_MAX_PER_RUN = _env("GUBA_BACKFILL_MAX_PER_RUN", "150", int)
 
 # ── 全市场舆情观测台（v4, 2026-06-06）──
 # 6 指数的成分股每周日 17:00 拉一次（指数再平衡是季度级，无需日更）

@@ -9,12 +9,13 @@ import time
 import logging
 import threading
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from backend.core.database import get_connection, get_sentiment_filters
 from backend.services.stock_service import _no_proxy
 from backend.config import (
     GUBA_CB_FAILURE_THRESHOLD, GUBA_CB_COOLDOWN_SECONDS,
     GUBA_HTTP_RETRIES, GUBA_HTTP_RETRY_BACKOFF,
+    GUBA_DETAIL_MIN_INTERVAL, GUBA_BACKFILL_MAX_PER_RUN,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,11 +30,23 @@ _DEFAULT_FILTER_KEYWORDS = ["转发", "阅读", "股吧", "收藏", "发表于"]
 # （<div id="root"> + fd_guba_validate 资源），里头没有 post_article JSON。
 # 列表页（list,X.html）不受影响。
 #
-# 修复策略（v2, 2026-06-06）：
-# 1. 启动时直接注入一组 bootstrap cookies（从真实浏览器会话提取）→ 立即可用
-# 2. 跨请求复用同一个 requests.Session，自动维护 cookie 生命周期
-# 3. 详情页返回 ~2.8KB 引导壳时（cookie 失效），重置 bootstrap 并尝试重新 warmup
-# 4. 重新 warmup 失败则降级为 audit_status=pending，等下次或人工介入
+# v9 2026-08-31 复盘修正（关键事实变化）：
+# 实测 guba 的 cookie 墙已整体放开--不携带任何 cookie 的全新 Session 也能拿到
+# 详情页正文；带 2026-06-06 的旧 cookie 同样正常。引导壳真正的触发条件是
+# **速率型反爬（验证码墙）**：持续高速抓取（如补抓积压正文、多线程审计/批量
+# 并发）后触发；触发后封锁窗口较长（实测 >40 分钟完全静默仍未解除），
+# 期间列表页与详情页均返回壳。cookie 注入/预热无法解决，也未观察到
+# UA 维度豁免。核心对策是从源头控速，避免触发。
+#
+# v9 策略（详见 _http_get_with_retry）：
+# 1. 保留 bootstrap cookie 注入（遗留兼容，无害；guba 已不校验）
+# 2. 详情页全局节流（_throttle_detail_request，GUBA_DETAIL_MIN_INTERVAL），
+#    所有线程（补抓/审计/批量）共享同一最小间隔，从源头避免触发反爬
+# 3. 引导壳改为退避重试（3s / 9s）；重试仍壳则置 _COOKIE_STALE 告警，
+#    但下一次成功的详情页会自动复位（自愈，无需重启或人工换 cookie）
+# 4. fetch_forum_posts 的正文补抓限定 days 窗口 + GUBA_BACKFILL_MAX_PER_RUN
+#    上限；旧实现会补抓该股 DB 中全部无正文帖子（单股数千条，见 2026-08-31
+#    积压 12.7 万条），数小时连续抓取必然触发反爬并长期降级
 
 # 来自真实浏览器会话的 anti-bot cookies（2026-06-06 提取）。
 # 这些 cookie 是 guba 域通用的反爬标识，不绑定用户；首次访问时直接注入。
@@ -79,27 +92,60 @@ def _inject_bootstrap_cookies() -> None:
 # 启动时立即注入一次
 _inject_bootstrap_cookies()
 
-_GUBA_WARMED_UP = True  # 标记：bootstrap 已就绪
+_GUBA_WARMED_UP = True  # 遗留标记（v9 起不再参与重试决策，仅保留兼容）
 _GUBA_WARMUP_LOCK = threading.Lock()
-# cookie 健康度（v7 2026-06-29）：warmup 后详情页仍返回引导壳 → cookie 过期。
-# warmup 只是重新注入同一组硬编码 cookie，无法真正刷新；置 stale 后由前端告警，
-# 需人工从浏览器重新提取 cookie 更新 _GUBA_BOOTSTRAP_COOKIES 并重启。
+# 反爬降级标志（v9 2026-08-31 语义变更）：详情页退避重试后仍返回引导壳时置 True，
+# 由 /api/sentiment/circuit_status 透出给前端告警。引导壳是速率型反爬（封锁窗
+# 口可达数十分钟），期间抓取层降级为 DB 缓存；周期探测在墙解除后自动复位，
+# 无需人工换 cookie 或重启。
 _COOKIE_STALE = False
 # 引导壳告警节流（v8 2026-06-30）：cookie 过期后，每个详情页请求都会返回引导壳。
-# 旧逻辑每次都做无意义 warmup + 打 2 行日志 → 1000+ 只股票刷屏。改为：
+# 旧逻辑每次都做无意义 warmup + 打 2 行日志 -> 1000+ 只股票刷屏。改为：
 # stale 后静默降级；一次性 error 日志最多每 5 分钟重复一次，防多线程竞争刷屏。
 _SHELL_WARN_INTERVAL = 300.0
 _last_shell_warn_ts = 0.0
+# v9：stale 期间的探测窗口。封锁窗内每个请求都付退避成本太贵；
+# 每 _SHELL_PROBE_INTERVAL 秒放行一次带退避的探测请求，墙解除后自动
+# 复位；其余时间直接快速返回引导壳（上层转 fetch_error / DB 缓存降级）。
+_SHELL_PROBE_INTERVAL = 60.0
+_last_shell_probe_ts = 0.0
+# v9：引导壳退避序列（独立于网络重试预算，避免互相挤占）
+_SHELL_BACKOFFS = (3.0, 9.0)
+# v9：详情页全局节流状态（预约时隙实现，见 _throttle_detail_request）
+_DETAIL_THROTTLE_LOCK = threading.Lock()
+_last_detail_req_ts = [0.0]
+
+
+def _throttle_detail_request(url: str) -> None:
+    """详情页（/news,*.html）全局节流：所有线程共享的最小请求间隔。
+
+    引导壳是速率型反爬：审计线程池（4 workers）+ 批量分析（5 workers）+
+    正文补抓循环并发打详情页时，实际速率远超单线程 0.3s sleep 的预期。
+    这里在请求入口统一限速（GUBA_DETAIL_MIN_INTERVAL，默认 0.8s/请求），
+    从源头避免触发反爬；列表页不节流。
+
+    实现为「预约时隙」：锁内计算自己应等待的时隙并登记，锁外 sleep，
+    保证并发线程的请求在时间上互不重叠。
+    """
+    if "/news," not in url:
+        return
+    with _DETAIL_THROTTLE_LOCK:
+        now = time.time()
+        wait = max(0.0, _last_detail_req_ts[0] + GUBA_DETAIL_MIN_INTERVAL - now)
+        _last_detail_req_ts[0] = now + wait
+    if wait > 0:
+        time.sleep(wait)
 
 
 def _warmup_guba_session() -> bool:
-    """重新注入 bootstrap cookies（cookie 失效时调用）。
+    """重新注入 bootstrap cookies（遗留接口，v9 起仅作兼容保留）。
 
-    guba 的反爬墙基于 cookie 鉴权：未携带 qgqp_b_id / st_nvi / nid18 /
-    gviem 等老访客 cookie 时，详情页（news,X,Y.html）只返回 ~2.8KB 引导壳。
+    v9 实测：guba 已不校验这些 cookie（空 cookie 也能取正文），warmup 对
+    引导壳无恢复作用；universe_service._prewarm_guba 仍调用本函数，保留
+    注入行为以维持既有导入契约。
 
     Returns:
-        True 注入成功（详情页能拿到 post_article JSON）；
+        True 注入成功（不保证详情页可用）；
         False 注入失败。
     """
     global _GUBA_WARMED_UP
@@ -210,87 +256,113 @@ def _http_get_with_retry(url: str, headers: dict, timeout: int,
                          retries: int = None, backoff: float = None) -> requests.Response:
     """带指数退避的 GET 重试（封装 _GUBA_CIRCUIT.call）。
 
-    行为：
+    v9 2026-08-31：引导壳（< 3KB + id="root"）实测为速率型间歇反爬，与 cookie
+    无关（空 cookie 也能取正文）。行为改为：
+    - 详情页请求前全局节流（_throttle_detail_request），从源头控制速率
+    - 引导壳时按 _SHELL_BACKOFFS 退避重试（不计入网络重试预算）
+    - stale 期间每 _SHELL_PROBE_INTERVAL 秒放行一次探测请求，成功即自愈复位
+    - warmup / bootstrap cookie 不再参与引导壳恢复路径
+
+    其余行为不变：
     - 走熔断器：熔断打开时立即 raise CircuitOpenError（< 1ms）
-    - 网络异常（ConnectionError / Timeout / ChunkedEncodingError）→ 指数退避重试
-    - 5xx / 429 → 同样重试
-    - 4xx（除 429）→ 不重试，不计入熔断失败（反爬响应）
-    - 200 但返回 ~2.8KB 引导壳（cookie 鉴权）→ 重置 warmup 标志，触发列表页预热后再试一次
+    - 网络异常（ConnectionError / Timeout / ChunkedEncodingError）-> 指数退避重试
+    - 5xx / 429 -> 同样重试
+    - 4xx（除 429）-> 不重试，不计入熔断失败（反爬响应）
 
     Args:
         url: 请求 URL
-        headers: HTTP 头（一般用不上，cookie 由共享 Session 维护）
+        headers: HTTP 头（忽略，cookie/UA 由共享 Session 维护；参数保留兼容旧调用点）
         timeout: 超时秒数
-        retries: 重试次数（不含首次），默认 GUBA_HTTP_RETRIES
-        backoff: 退避基数秒，默认 GUBA_HTTP_RETRY_BACKOFF
+        retries: 网络重试次数（不含首次），默认 GUBA_HTTP_RETRIES
+        backoff: 网络重试退避基数秒，默认 GUBA_HTTP_RETRY_BACKOFF
     """
     if retries is None:
         retries = GUBA_HTTP_RETRIES
     if backoff is None:
         backoff = GUBA_HTTP_RETRY_BACKOFF
 
+    def _is_shell(r: requests.Response) -> bool:
+        return (r.status_code == 200
+                and len(r.text) < 3000
+                and "id=\"root\"" in r.text)
+
     def _do():
         with _no_proxy():
+            # 详情页节流：所有线程共享最小间隔（预约时隙）
+            _throttle_detail_request(url)
             # 用共享 Session 自动带上 cookie
             return _GUBA_SESSION.get(url, timeout=timeout)
 
     last_exc = None
-    warmed_retry_done = False
-    for attempt in range(retries + 1):
+    network_attempt = 0   # 网络异常 / 5xx / 429 重试计数
+    shell_retry_idx = 0   # 引导壳退避重试计数（独立预算）
+    while True:
         try:
             r = _GUBA_CIRCUIT.call(_do)
-            # 5xx / 429 视为服务端瞬时错误，重试
-            if r.status_code == 429 or r.status_code >= 500:
-                if attempt < retries:
-                    sleep_s = backoff * (2 ** attempt)
-                    logger.debug(f"HTTP {r.status_code} → 重试 ({attempt+1}/{retries}) sleep={sleep_s:.1f}s")
-                    time.sleep(sleep_s)
-                    continue
-            # 200 但内容是 cookie 引导壳（< 3KB 且包含 root 容器）→ cookie 鉴权失败
-            if (r.status_code == 200
-                    and len(r.text) < 3000
-                    and "id=\"root\"" in r.text):
-                global _GUBA_WARMED_UP, _COOKIE_STALE, _last_shell_warn_ts
-                # 已判定 cookie 过期：warmup 只是重新注入同一组过期硬编码 cookie，
-                # 无济于事。静默降级返回引导壳（上层 fetch_post_full 会转成
-                # fetch_error，列表页标题仍可用），不再每个请求都打日志/做 warmup。
-                if _COOKIE_STALE:
-                    return r
-                if not warmed_retry_done:
-                    # 首次引导壳：尝试一次 warmup（应对 session cookie jar 丢失的
-                    # 瞬时情况），重试一次看是否恢复
-                    logger.info(f"[guba] 详情页返回引导壳（len={len(r.text)}），尝试 cookie 预热")
-                    _GUBA_WARMED_UP = False
-                    if _warmup_guba_session():
-                        warmed_retry_done = True
-                        continue  # 用新 cookie 重试
-                else:
-                    # warmup 后仍引导壳 → 硬编码 cookie 过期，正文抓取失效
-                    _COOKIE_STALE = True
-                    now = time.time()
-                    if now - _last_shell_warn_ts > _SHELL_WARN_INTERVAL:
-                        logger.error(
-                            "[guba] cookie 预热后仍返回引导壳，判定 cookie 过期 —— "
-                            "正文抓取将降级（列表页标题仍可用）；恢复需人工更新 "
-                            "_GUBA_BOOTSTRAP_COOKIES 并重启"
-                        )
-                        _last_shell_warn_ts = now
-            return r
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout,
                 requests.exceptions.ChunkedEncodingError) as e:
             last_exc = e
-            if attempt < retries:
-                sleep_s = backoff * (2 ** attempt)
-                logger.debug(f"网络错误 → 重试 ({attempt+1}/{retries}) sleep={sleep_s:.1f}s: {e}")
+            if network_attempt < retries:
+                sleep_s = backoff * (2 ** network_attempt)
+                network_attempt += 1
+                logger.debug(f"网络错误 -> 重试 sleep={sleep_s:.1f}s: {e}")
                 time.sleep(sleep_s)
                 continue
             raise
         except CircuitOpenError:
             raise  # 熔断中，不重试
-    if last_exc:
-        raise last_exc
-    return None  # 不应到达
+
+        # 5xx / 429 视为服务端瞬时错误，走网络重试预算
+        if r.status_code == 429 or r.status_code >= 500:
+            if network_attempt < retries:
+                sleep_s = backoff * (2 ** network_attempt)
+                network_attempt += 1
+                logger.debug(
+                    f"HTTP {r.status_code} -> 重试 sleep={sleep_s:.1f}s"
+                )
+                time.sleep(sleep_s)
+                continue
+            return r  # 预算耗尽，交由上层按非 200 处理
+
+        # 200 但内容是引导壳 -> 速率型反爬触发
+        global _COOKIE_STALE, _last_shell_warn_ts, _last_shell_probe_ts
+        if _is_shell(r):
+            # stale 已置位：仅在探测窗口放行（每 _SHELL_PROBE_INTERVAL 一次），
+            # 其余快速失败返回壳（上层转 fetch_error），避免每请求都付退避成本
+            if _COOKIE_STALE:
+                now = time.time()
+                if now - _last_shell_probe_ts < _SHELL_PROBE_INTERVAL:
+                    return r
+                with _GUBA_WARMUP_LOCK:
+                    _last_shell_probe_ts = now
+            # 退避重试：给反爬冷却窗口（独立预算，不挤占网络重试）
+            if shell_retry_idx < len(_SHELL_BACKOFFS):
+                sleep_s = _SHELL_BACKOFFS[shell_retry_idx]
+                shell_retry_idx += 1
+                logger.info(
+                    f"[guba] 详情页返回引导壳（len={len(r.text)}），"
+                    f"退避 {sleep_s:.0f}s 后重试（速率型反爬）"
+                )
+                time.sleep(sleep_s)
+                continue
+            # 退避后仍引导壳 -> 置 stale 告警，等待周期探测自愈
+            _COOKIE_STALE = True
+            now = time.time()
+            if now - _last_shell_warn_ts > _SHELL_WARN_INTERVAL:
+                logger.error(
+                    "[guba] 引导壳退避重试后仍失败，判定触发速率型反爬 -- "
+                    "正文抓取临时降级（列表页标题仍可用）；已启用周期探测，"
+                    "反爬解除后自动恢复"
+                )
+                _last_shell_warn_ts = now
+            return r
+
+        # 成功响应；详情页成功即反爬解除，复位 stale 告警
+        if _COOKIE_STALE and "/news," in url:
+            _COOKIE_STALE = False
+            logger.info("[guba] 详情页恢复正常，反爬自愈，复位 stale 告警")
+        return r
 
 
 def filter_posts(posts: list[dict], filter_type: str = "title_keyword") -> list[dict]:
@@ -435,6 +507,17 @@ def fetch_post_list(code: str, days: int = 7, max_posts: int = 100) -> list[dict
 
             data = _extract_json(r.text, "article_list")
             if not data:
+                # v9 2026-08-31：列表页也可能被速率型反爬打壳（返回「身份核实」
+                # 引导壳而非帖子数据）。壳响应不 raise，这里显式置 stale，
+                # 让 fetch_forum_posts 的 DB 缓存降级路径能被正确触发。
+                if r.status_code == 200 and len(r.text) < 3000 and "id=\"root\"" in r.text:
+                    global _COOKIE_STALE
+                    if not _COOKIE_STALE:
+                        logger.warning(
+                            f"[guba] 列表页返回引导壳（len={len(r.text)}），"
+                            "判定触发速率型反爬，置降级标志"
+                        )
+                        _COOKIE_STALE = True
                 break
             items = data.get("re", [])
 
@@ -521,7 +604,7 @@ def fetch_post_full(code: str, post_id: str) -> dict | None:
     中的 post_title 字段（与列表页 article_list 的 post_title 经常不一致）。
 
     2026-06 之后 guba 详情页改造：
-    - 未携带 anti-bot cookies 时只返回 2.8KB 引导壳（由 _GUBA_SESSION + bootstrap 处理）
+    - 高速抓取时只返回 2.8KB 引导壳（速率型反爬，v9 起由退避重试 + 自愈探测处理）
     - post_id 形如 1xxxxxxxxx 的"转发/转载"帖，post_article.post_title 是 "转发"，
       真实标题在 source_post_title 字段。本函数对这种帖会自动取源帖标题作为 actual_title
 
@@ -865,6 +948,19 @@ def fetch_forum_posts(code: str, forum_type: str = "eastmoney",
     posts = filter_posts(posts)
 
     if not posts:
+        # 列表页被反爬墙（返回壳，无 article_list）时 posts 为空。v9 2026-08-31：
+        # 与熔断同样走 DB 缓存降级，而不是静默返回空（上层会把空当成
+        # no_posts 故障）。缓存为空时保持空返回 + 明确日志。
+        if _COOKIE_STALE or _GUBA_CIRCUIT.state["state"] != "closed":
+            logger.warning(
+                f"[{code}] guba 反爬降级中（stale={_COOKIE_STALE}），回退 DB 缓存"
+            )
+            cached = get_recent_posts(code, forum_type, limit=100)
+            if cached:
+                return cached, {"audited": 0, "matched": 0, "mismatched": 0,
+                                "fetch_errors": 0, "skipped": 0,
+                                "degraded": True}
+            logger.warning(f"[{code}] DB 缓存也为空，本次返回空列表")
         return [], None
 
     # 缓存帖子到 DB，去重
@@ -889,14 +985,21 @@ def fetch_forum_posts(code: str, forum_type: str = "eastmoney",
 
     # 获取新增帖子的正文内容
     if fetch_content:
-        # 对没有内容的帖子补充正文（包括缓存中已有的）
-        posts_need_content = []
+        # v9 2026-08-31：补抓范围限定 days 窗口 + 每轮上限。
+        # 旧实现补抓该股 DB 中全部无正文帖子（历史积压可达数千条/股），
+        # 数小时连续抓取触发速率型反爬，且抓到的旧正文对 days 窗口内的
+        # 情绪分析毫无价值。窗口内积压由多轮 prefetch（fetch_content=False）
+        # 后的日常分析逐步消化；每轮上限保护单次调用的总时长。
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute(
                 """SELECT url FROM forum_posts
-                   WHERE stock_code=? AND forum_type=? AND (content IS NULL OR content='')""",
-                (code, forum_type),
+                   WHERE stock_code=? AND forum_type=? AND (content IS NULL OR content='')
+                     AND post_time >= ?
+                   ORDER BY post_time DESC
+                   LIMIT ?""",
+                (code, forum_type, cutoff, GUBA_BACKFILL_MAX_PER_RUN),
             )
             posts_need_content = [row["url"] for row in cur.fetchall()]
 
@@ -904,6 +1007,10 @@ def fetch_forum_posts(code: str, forum_type: str = "eastmoney",
             # 熔断检测：遇到熔断就跳出循环
             if _GUBA_CIRCUIT.state["state"] == "open":
                 logger.warning(f"抓取帖子正文时熔断打开: {code} 剩余 {len(posts_need_content)} 条未抓")
+                break
+            # 反爬降级中：本轮放弃补抓（stale 告警由探测自动恢复）
+            if _COOKIE_STALE:
+                logger.warning(f"[{code}] 反爬降级中，本轮跳过正文补抓（{len(posts_need_content)} 条待抓）")
                 break
             # 从 URL 提取 post_id: .../news,{code},{post_id}.html
             pid_match = re.search(r"/news,\d+,(\d+)\.html", url)
@@ -924,7 +1031,6 @@ def fetch_forum_posts(code: str, forum_type: str = "eastmoney",
                         )
                 except Exception:
                     pass
-            time.sleep(0.3)  # 避免请求过快
 
     # 返回所有帖子（带审计字段，过滤掉 broken 但保留 NULL）
     result = []

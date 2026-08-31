@@ -94,7 +94,7 @@
           <span class="alert-dot" /> {{ circuitBadge.text }}（点击重置）
         </div>
         <div v-if="cookieStale" class="alert-chip alert-chip--stale">
-          帖子正文抓取可能失效：guba cookie 疑似过期，需更新 _GUBA_BOOTSTRAP_COOKIES 后重启
+          帖子正文抓取临时降级：guba 触发速率型反爬，冷却后将自动恢复（列表页标题不受影响）
         </div>
       </div>
     </ModernCard>

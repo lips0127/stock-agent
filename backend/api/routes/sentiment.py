@@ -656,7 +656,12 @@ def fetch_only():
 @sentiment_bp.route("/api/sentiment/circuit_status", methods=["GET"])
 @login_required
 def circuit_status():
-    """guba 熔断器状态 + cookie 健康度（调试 + 前端展示）。"""
+    """guba 熔断器状态 + 反爬降级标志（调试 + 前端展示）。
+
+    cookie_stale 语义（v9 2026-08-31）：引导壳退避重试后仍失败，判定触发
+    速率型间歇反爬。与 cookie 无关，反爬冷却后由周期探测自动复位，无需
+    人工更新 cookie 或重启；字段名保留以兼容前端。
+    """
     from backend.services.forum_service import _GUBA_CIRCUIT, _COOKIE_STALE
     state = dict(_GUBA_CIRCUIT.state)
     state["cookie_stale"] = _COOKIE_STALE
@@ -666,7 +671,7 @@ def circuit_status():
 @sentiment_bp.route("/api/sentiment/circuit_reset", methods=["POST"])
 @login_required
 def circuit_reset():
-    """手动重置 guba 熔断器（同时清除 cookie stale 告警，便于更新 cookie 后重试）。"""
+    """手动重置 guba 熔断器与反爬降级告警（运维逃生口，正常情况下自愈）。"""
     import backend.services.forum_service as fm
     fm._GUBA_CIRCUIT.reset()
     fm._COOKIE_STALE = False
