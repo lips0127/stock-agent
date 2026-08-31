@@ -276,6 +276,8 @@ Gunicorn 多 worker 会各自初始化 APScheduler，可能导致同一任务重
 
 调度任务和手工任务都必须防止同类长任务重叠，并记录 skipped、failed 或 cancelled，而非静默返回成功。
 
+调度 cron 时刻（hour/minute/day_of_week）按 **Asia/Shanghai** 语义解释：生产容器固定 `TZ=Asia/Shanghai`（tzdata），`/tasks` 页与任务历史中的时间均为北京时间。启用状态的调度任务注册后必须带 trigger 计算出的 `next_run_time`；APScheduler 3.x 中 `add_job(next_run_time=None)` 的语义是「以暂停态添加」，禁用任务须在调度器 start() 之后显式 pause（2026-08-31 修复：上述两点曾被写反，导致 8 个 cron 任务出生即暂停、永不触发，回归见 `tests/test_scheduler_init.py`）。
+
 ## 11. API 契约与鉴权
 
 ### 11.1 公共接口

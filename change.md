@@ -1,5 +1,25 @@
 # Change Log
 
+## 2026-08-31
+
+### 修复调度器 cron 任务「出生即暂停、永不触发」（生产事故，服务器部署验证）
+
+用户在服务器 `/tasks` 页质疑定时任务有效性，排查发现：**10 个调度任务中只有 forum_prefetch 在真实执行**（每 2h，11 次全成功），其余 8 个 cron 任务（daily_update/sentiment/vix/tenbag_scan/top_picks/indicators_recompute、universe 三个）部署 20 小时无一触发，DB `next_run_time` 全为 NULL。
+
+**根因（两层）**：
+1. `scheduler.init_scheduler` 以 `add_job(..., next_run_time=None)` 注册任务——APScheduler 3.x 中该参数为 None 的语义是「以暂停态添加」，不是「按 trigger 计算」。仅 forum_prefetch 显式传了 now 得以幸免。容器内 3.11.2 同款复现实锤。
+2. 禁用任务的 `pause()` 原写在调度器 `start()` 之前，对 pending 任务不生效（start 时按 trigger 重算 next_run_time 覆盖暂停态）。修复前该分支从未被执行过（所有任务已被 next_run_time=None 提前暂停），故未暴露。
+
+**连带发现**：容器时区为 UTC，cron 时刻按北京时间语义设计（如 daily_vix=16:30 收盘后），实际会在凌晨触发且 mon-fri 错位为北京周二至周六。
+
+**修复**：
+- `init_scheduler`：启用任务注册时省略 `next_run_time`；禁用任务在 `start()` 之后统一 `pause()`。
+- `backend/Dockerfile`：运行时层装 `tzdata` 并固定 `TZ=Asia/Shanghai`（/etc/localtime + ENV 双保险）。
+- 回归测试 `tests/test_scheduler_init.py`：① 启用 cron 任务注册后 next_run_time 必须非 None；② 禁用任务必须 paused（先红后绿）。
+- SPEC §10 增补 cron 时区语义与注册契约。
+
+**验证**：pytest 调度测试 5 用例通过；`server_ops.py deploy` 后服务器 DB `next_run_time` 全部落为北京时间具体时刻、容器日志时间戳 +08。
+
 ## 2026-08-30
 
 ### 产品收敛日：能力下线、新功能、安全部署与口径修复（main）

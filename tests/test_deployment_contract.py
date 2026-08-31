@@ -84,7 +84,8 @@ def test_backend_dockerfile_builds_frontend_and_backend_into_one_image():
     # 前端阶段：干净 npm ci + 构建，产物拷入运行时镜像由 Flask 静态服务
     assert "FROM node:22-alpine AS frontend-builder" in dockerfile
     assert "COPY frontend/package.json frontend/package-lock.json ./" in dockerfile
-    assert "RUN npm ci" in dockerfile
+    # npm ci 命令本身必须存在（可带 registry 镜像源前缀，见 2026-08-30 国内加速）
+    assert "npm ci" in dockerfile
     assert "RUN npm run build" in dockerfile
     assert "COPY --from=frontend-builder --chown=appuser:appuser /web/dist /app/frontend/dist" in dockerfile
 

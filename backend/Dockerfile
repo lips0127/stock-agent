@@ -40,6 +40,9 @@ RUN sed -i 's|deb.debian.org|mirrors.cloud.tencent.com|g; s|security.debian.org|
         /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true \
     && apt-get update && apt-get install -y --no-install-recommends \
     libffi8 \
+    tzdata \
+    && ln -fs /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -g 1001 appuser && useradd -u 1001 -g appuser -d /app -s /sbin/nologin appuser
@@ -61,6 +64,7 @@ RUN sed -i 's/\r$//' /app/backend/entrypoint.sh \
 USER appuser
 
 ENV PYTHONUNBUFFERED=1 \
+    TZ=Asia/Shanghai \
     APP_HOST=0.0.0.0 \
     APP_PORT=5000 \
     APP_DEBUG=false \

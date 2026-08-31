@@ -478,13 +478,24 @@ def init_scheduler():
             continue
         trigger = build_trigger(row)
         # forum_prefetch 启动后立刻跑一次（guba 列表页不依赖 cookie，可 warm 缓存）。
-        next_run = datetime.now() if job_id == "forum_prefetch" else None
-        _scheduler.add_job(func, trigger, id=job_id, next_run_time=next_run)
+        # 注意：APScheduler 3.x 中 add_job(next_run_time=None) 的语义是「以暂停态添加」，
+        # 不是「按 trigger 计算」——省略该参数才是启用状态。2026-08-31 曾因此导致
+        # 全部 cron 任务出生即暂停、永不触发（回归：tests/test_scheduler_init.py）。
+        if job_id == "forum_prefetch":
+            _scheduler.add_job(func, trigger, id=job_id, next_run_time=datetime.now())
+        else:
+            _scheduler.add_job(func, trigger, id=job_id)
         n_added += 1
-        if not row["enabled"]:
-            _scheduler.get_job(job_id).pause()
-            logger.info(f"scheduler {job_id}: 启动时即 disabled, paused")
     _scheduler.start()
+
+    # 禁用任务必须在 start() 之后 pause：对 start() 前的 pending 任务调用
+    # pause() 不会生效，start() 会按 trigger 重算 next_run_time 把暂停态覆盖掉。
+    for row in rows:
+        if not row["enabled"]:
+            job = _scheduler.get_job(row["job_id"])
+            if job:
+                job.pause()
+                logger.info(f"scheduler {row['job_id']}: 启动时即 disabled, paused")
 
     # 同步 next_run_time 到 DB（仅用于首屏展示）
     from backend.core.database import update_scheduler_next_run
