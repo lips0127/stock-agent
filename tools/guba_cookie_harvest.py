@@ -9,34 +9,48 @@
     python -m tools.guba_cookie_harvest          # 采集并写 $CACHE_DIR/guba_cookies.json
     python -m tools.guba_cookie_harvest --verify # 采集后立即验证有效性
 
+浏览器选择：Windows 用 Edge（老开发机路径）；Linux/服务器用 playwright
+自带的 chromium；可用环境变量 GUBA_HARVEST_EXECUTABLE 显式指定。
+
 cookie 文件路径为 $CACHE_DIR/guba_cookies.json（与 stocks.db 同目录、
 Docker 中位于 /data 卷，重建容器不丢）；forum_service 启动及 stale 探测
 时会自动热加载该文件，采集后约 1 分钟内生效，无需重启。
+
+服务器（宿主机）用法示例：
+    sudo CACHE_DIR=/var/lib/docker/volumes/stock-agent_app-data/_data/cache \
+        python3 tools/guba_cookie_harvest.py --verify
 """
 import asyncio
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CACHE_DIR = Path(__import__("os").environ.get("CACHE_DIR", str(PROJECT_ROOT)))
+CACHE_DIR = Path(os.environ.get("CACHE_DIR", str(PROJECT_ROOT)))
 COOKIE_FILE = CACHE_DIR / "guba_cookies.json"
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
 PROBE_URL = "https://guba.eastmoney.com/list,600584.html"
 
 
+def _launch_kwargs() -> dict:
+    """Windows 老开发机用 Edge；Linux 服务器用 playwright 自带 chromium。"""
+    kwargs = {"headless": True}
+    exe = os.environ.get("GUBA_HARVEST_EXECUTABLE") or (EDGE if os.name == "nt" else "")
+    if exe and Path(exe).exists():
+        kwargs["executable_path"] = exe
+    return kwargs
+
+
 async def harvest() -> list[dict]:
     from playwright.async_api import async_playwright
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            executable_path=EDGE,
-            headless=True,
-        )
+        browser = await p.chromium.launch(**_launch_kwargs())
         ctx = await browser.new_context(
             viewport={"width": 1440, "height": 900},
             locale="zh-CN",
