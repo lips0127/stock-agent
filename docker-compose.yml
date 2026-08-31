@@ -25,6 +25,10 @@ services:
       DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:?DEFAULT_ADMIN_PASSWORD must be set}
       CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS must be set}
       ENABLE_HSTS: ${ENABLE_HSTS:-false}
+      # LLM 分析供应商（可选，舆情分析/财报解析用；按 DEEPSEEK > MINIMAX > VOLCANO 优先级取用）
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      VOLCANO_API_KEY: ${VOLCANO_API_KEY:-}
     volumes:
       - app-data:/data
     healthcheck:

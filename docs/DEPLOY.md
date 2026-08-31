@@ -46,6 +46,7 @@ vim .env   # 填入 JWT_SECRET / 管理员账号 / CORS_ORIGINS
 | `DEFAULT_ADMIN_PASSWORD` | ≥12 位，不得为示例值 |
 | `CORS_ORIGINS` | 显式列出，如 `http://<服务器IP>`；禁止 `*` |
 | `ENABLE_HSTS` | 前置 TLS 时 `true`，纯 HTTP 保持 `false` |
+| `MINIMAX_API_KEY` / `DEEPSEEK_API_KEY` / `VOLCANO_API_KEY` | 可选，LLM 分析（舆情分析、财报解析）供应商，按 DEEPSEEK > MINIMAX > VOLCANO 优先级取用；全留空则相关功能降级 |
 
 ## 4. 部署与验证
 
