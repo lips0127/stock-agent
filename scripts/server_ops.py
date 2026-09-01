@@ -7,6 +7,7 @@
     python scripts/server_ops.py logs [N]        # 查看应用日志（默认 100 行）
     python scripts/server_ops.py health          # 服务器本机 + 本地外网两级健康检查
     python scripts/server_ops.py backup          # app-data 卷打包到服务器 ~/backups/
+    python scripts/server_ops.py cookies         # guba 反爬墙解锁：采集新 cookie -> 热加载 -> 实测
     python scripts/server_ops.py exec "命令"     # 在服务器上执行任意命令
 
 连接信息读仓库根目录的 ``server.local.json``（已 gitignore，绝不入库）：
@@ -179,6 +180,46 @@ def cmd_backup(cfg: dict) -> int:
     ), timeout=300)
 
 
+# compose 项目名默认取 app_dir 目录名（stock-agent），数据卷即 stock-agent_app-data
+VOLUME_CACHE = "/var/lib/docker/volumes/stock-agent_app-data/_data/cache"
+
+
+def cmd_cookies(cfg: dict) -> int:
+    """guba 反爬墙解锁：宿主机 headless chromium 过静默挑战采集新 cookie，
+    写入数据卷 cache（guba_cookies.json），容器 60s 探测窗口热加载后实测。
+
+    适用症状：/sentiment 页出现「正文抓取临时降级」横幅且长时间不自愈、
+    批量分析大量「无可用帖子」。guba 偶发降级会自愈，无需动用本命令。
+    """
+    print("[1/4] 服务器宿主机采集 cookie（约 1 分钟，含 --verify 校验）...")
+    rc = ssh(cfg, (
+        f"cd {cfg['app_dir']} && sudo CACHE_DIR={VOLUME_CACHE} "
+        "python3 tools/guba_cookie_harvest.py --verify 2>&1 | tail -6"
+    ), timeout=180)
+    if rc != 0:
+        print("采集失败：看上方输出；宿主机需 python3 + playwright + chromium"
+              "（/root/.cache/ms-playwright）。可稍后重试或换时段。")
+        return rc
+
+    print("[2/4] 等待容器热加载（60s 探测窗口）...")
+    time.sleep(65)
+
+    print("[3/4] 容器内实测 guba 列表抓取...")
+    probe = (
+        'sudo docker exec stock-app python3 -c "'
+        "import sys; sys.path.insert(0, '/app'); "
+        "from backend.services.forum_service import fetch_post_list, _COOKIE_STALE; "
+        "posts = fetch_post_list('600036', days=7, max_posts=3); "
+        "print('guba 列表实测:', len(posts), '条; stale =', _COOKIE_STALE)"
+        '"'
+    )
+    rc = ssh(cfg, probe, timeout=120)
+
+    print("[4/4] 判读：拿到 >0 条即解锁成功；仍为 0 条则墙未退（属 IP 级冷却），"
+          "数分钟后再跑一次本命令，或检查上方 --verify 输出确认 cookie 本身有效。")
+    return rc
+
+
 def main() -> int:
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help"):
@@ -196,6 +237,8 @@ def main() -> int:
         return cmd_health(cfg)
     if cmd == "backup":
         return cmd_backup(cfg)
+    if cmd == "cookies":
+        return cmd_cookies(cfg)
     if cmd == "exec":
         if not rest:
             sys.exit('exec 需要一个命令参数，如: exec "sudo docker ps"')

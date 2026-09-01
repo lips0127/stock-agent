@@ -2,6 +2,12 @@
 
 ## 2026-09-01
 
+### 部署能力沉淀为 SKILL + TOOL（供后续所有会话使用）
+
+- **Tool**：`scripts/server_ops.py` 新增 `cookies` 子命令——guba 反爬墙解锁端到端封装（宿主机采集 → 写数据卷 → 等容器热加载 → 容器内实测列表抓取）。原有 status/deploy/logs/health/backup/exec 不变。
+- **Skill**：用户级技能 `~/.agents/skills/stock-agent-deploy/SKILL.md`（ZCode 所有会话可见）：能力入口、常用命令、deploy 流程与门禁、服务器既有事实（TZ/单实例调度/LLM key 位置）、cookie 解锁、运维红线（长任务脱离会话、密钥零回显、先查日志 DB 再猜）。
+- 连接配置与凭证保持本地化：`server.local.json`、`doc/cloud_server.md`、`tencent_key` 均 gitignore，技能文件只引用路径不含真实值。
+
 ### 修复 batch_analyze 显式 codes 路径 UnboundLocalError + guba 反爬墙解锁（服务器实战）
 
 **批量分析失败连环排查**：用户新增 4 只监控股后批量分析 4/5 失败（"无可用帖子"），单独补跑 600036 又两次崩溃。
